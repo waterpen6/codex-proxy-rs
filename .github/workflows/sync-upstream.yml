@@ -1,0 +1,31 @@
+name: Sync upstream
+
+on:
+  workflow_dispatch:
+  schedule:
+    # 每天北京时间 10:17；GitHub 定时任务可能延迟。
+    - cron: '17 2 * * *'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: sync-upstream
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    if: github.repository == 'waterpen6/codex-proxy-rs' && (github.event_name == 'workflow_dispatch' || vars.ENABLE_UPSTREAM_SYNC == 'true')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Merge upstream into main without discarding fork changes
+        env:
+          GH_TOKEN: ${{ secrets.UPSTREAM_SYNC_TOKEN || github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          gh api --method POST "repos/${GH_REPO}/merge-upstream" \
+            -H 'Accept: application/vnd.github+json' \
+            -H 'X-GitHub-Api-Version: 2022-11-28' \
+            -f branch=main

@@ -1,5 +1,7 @@
 # 部署与运维
 
+Zeabur 用户请使用 [Zeabur 原生模板](zeabur/README.md)，下文的 Compose 安装方式适用于自管 Docker 主机。
+
 首次安装可按 [快速开始](../README.md#快速开始) 操作。
 本文补充客户端配置、权限、备份和升级；部署命令从安装目录 `codex-proxy-rs/` 执行，
 其中 `deploy/` 存放 Compose 文件和配置，`.runtime/` 存放持久化数据。

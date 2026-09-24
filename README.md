@@ -45,6 +45,12 @@
 
 ## 快速开始
 
+### Zeabur 部署
+
+本 Fork 提供 [Zeabur 一键部署模板与操作说明](deploy/zeabur/README.md)，一起创建网关、PostgreSQL 和 Redis，
+自动配置随机凭据与持久化存储。模板从 `waterpen6/codex-proxy-rs` 的 `main` 构建，使用前需将部署配置合入该分支。
+Fork 的更新机制与可选自动同步见 [上游同步说明](deploy/zeabur/README.md#上游同步)。
+
 使用 Docker Compose 部署版本固定的发布镜像，同时启动 PostgreSQL 和 Redis。
 以下命令适用于 Linux amd64/arm64，需要 Docker Engine、Docker Compose Plugin、curl 和 OpenSSL。已有部署请先看
 [升级说明](deploy/README.md#镜像升级与源码构建)，不要覆盖原配置

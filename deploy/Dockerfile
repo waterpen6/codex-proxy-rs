@@ -94,3 +94,18 @@ RUN chmod +x /app/bin/codex-proxy-rs \
     && chmod 0555 /app/bin/plugins/official \
     && chmod 0755 /app/bin/plugins
 USER cpr
+
+# Zeabur 从源码构建；Compose 和发布流水线仍显式选择各自的 runtime target。
+FROM runtime AS zeabur
+
+USER root
+RUN apt-get update \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends gosu \
+    && rm -rf /var/lib/apt/lists/*
+COPY --chmod=755 deploy/zeabur/entrypoint.sh /usr/local/bin/zeabur-entrypoint
+ENV CPR_SERVER_HOST=0.0.0.0 \
+    CPR_SERVER_PORT=8080 \
+    CPR_WEB_DIST_DIR=/app/web/dist \
+    CPR_ENABLE_SELF_RESTART=false
+ENTRYPOINT ["/usr/local/bin/zeabur-entrypoint"]
+CMD ["/app/bin/codex-proxy-rs"]

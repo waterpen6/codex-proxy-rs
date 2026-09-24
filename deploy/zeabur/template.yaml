@@ -1,0 +1,165 @@
+# yaml-language-server: $schema=https://schema.zeabur.app/template.json
+apiVersion: zeabur.com/v1
+kind: Template
+metadata:
+  name: Codex Proxy RS
+spec:
+  description: Self-hosted Codex gateway with PostgreSQL and Redis, built from waterpen6's fork.
+  icon: https://raw.githubusercontent.com/waterpen6/codex-proxy-rs/main/frontend/public/favicon.svg
+  tags:
+    - AI
+    - Tool
+  variables:
+    - key: PUBLIC_DOMAIN
+      type: DOMAIN
+      name: Domain
+      description: Choose a domain for the gateway.
+  readme: |-
+    # Codex Proxy RS
+    Deploys PostgreSQL 18, Redis 8 and a single gateway built from waterpen6/codex-proxy-rs.
+    The Zeabur deployment changes must be present on the repository's main branch first.
+    Sign in as admin@cpr.local using the gateway service's Initial admin password instruction.
+    Database credentials are derived from separate platform-generated random seeds.
+    Keep the seeds and persistent volumes when restarting or redeploying.
+    Upgrade by redeploying the Git service; do not use in-container updates.
+  services:
+    - name: postgres
+      template: PREBUILT
+      spec:
+        source:
+          image: postgres:18-bookworm@sha256:d9c83446333daec3f0588cc709adb80c26090b7f9f0f7ec8d43c243385d79818
+          command:
+            - /bin/sh
+            - -ec
+          args:
+            - |
+              : "${POSTGRES_SEED:?POSTGRES_SEED is required}"
+              POSTGRES_PASSWORD=$(printf '%s' "$POSTGRES_SEED" | sha256sum | cut -c 1-48)
+              export POSTGRES_PASSWORD
+              exec docker-entrypoint.sh postgres
+        ports:
+          - id: database
+            port: 5432
+            type: TCP
+        volumes:
+          - id: postgres-data
+            dir: /var/lib/postgresql
+        env:
+          POSTGRES_USER:
+            default: codex_proxy
+          POSTGRES_DB:
+            default: codex_proxy
+          POSTGRES_INITDB_ARGS:
+            default: --auth-local=scram-sha-256 --auth-host=scram-sha-256
+          POSTGRES_SEED:
+            default: ${PASSWORD}
+            expose: true
+          POSTGRES_URL_WITHOUT_PASSWORD:
+            default: postgres://codex_proxy@${CONTAINER_HOSTNAME}:5432/codex_proxy
+            expose: true
+    - name: redis
+      template: PREBUILT
+      spec:
+        source:
+          image: redis:8-alpine@sha256:9d317178eceac8454a2284a9e6df2466b93c745529947f0cd42a0fa9609d7005
+          command:
+            - /bin/sh
+            - -ec
+          args:
+            - |
+              : "${REDIS_SEED:?REDIS_SEED is required}"
+              redis_password=$(printf '%s' "$REDIS_SEED" | sha256sum | cut -c 1-48)
+              exec docker-entrypoint.sh redis-server --appendonly yes --requirepass "$redis_password"
+        ports:
+          - id: database
+            port: 6379
+            type: TCP
+        volumes:
+          - id: redis-data
+            dir: /data
+        env:
+          REDIS_SEED:
+            default: ${PASSWORD}
+            expose: true
+          REDIS_URL_WITHOUT_PASSWORD:
+            default: redis://${CONTAINER_HOSTNAME}:6379/
+            expose: true
+    - name: codex-proxy-rs
+      template: GIT
+      domainKey: PUBLIC_DOMAIN
+      dependencies:
+        - postgres
+        - redis
+      spec:
+        source:
+          source: GITHUB
+          repo: 1384761843
+          branch: main
+        ports:
+          - id: web
+            port: 8080
+            type: HTTP
+        volumes:
+          - id: runtime
+            dir: /app/.runtime
+        env:
+          CPR_ADMIN_PASSWORD:
+            default: ${PASSWORD}
+          CPR_POSTGRES_SEED:
+            default: ${POSTGRES_SEED}
+          CPR_REDIS_SEED:
+            default: ${REDIS_SEED}
+          CPR_DATABASE_URL:
+            default: ${POSTGRES_URL_WITHOUT_PASSWORD}
+          CPR_REDIS_URL:
+            default: ${REDIS_URL_WITHOUT_PASSWORD}
+        configs:
+          - path: /app/deploy/config.yaml
+            permission: 420
+            envsubst: true
+            template: |
+              schema_version: 1
+              host:
+                listen:
+                  host: '0.0.0.0'
+                  port: 8080
+                runtime_data_dir: '/app/.runtime/data'
+                logging:
+                  level: 'info'
+                  stdout: true
+                  oauth_recovery: false
+                  request_dump: false
+                  file:
+                    enabled: false
+                    directory: '/app/.runtime/logs'
+                    retention_days: 7
+                    max_file_size_mb: 20
+                drain_timeout_seconds: 30
+                worker_shutdown_timeout_seconds: 30
+              store:
+                database:
+                  url: 'postgres://codex_proxy@localhost:5432/codex_proxy'
+                  password: ''
+                redis:
+                  url: 'redis://localhost:6379/'
+                  password: ''
+              admin:
+                session_ttl_minutes: 1440
+                default_username: 'admin@cpr.local'
+                default_password: '${CPR_ADMIN_PASSWORD}'
+              client:
+                session_ttl_minutes: 1440
+              api:
+                asset_directory: '/app/web/dist'
+                cors_allowed_origins: []
+                request_timeout_seconds: null
+                request_id_header: 'x-request-id'
+              openai:
+                residency: us
+        instructions:
+          - type: PASSWORD
+            title: Initial admin password
+            content: ${CPR_ADMIN_PASSWORD}
+          - type: TEXT
+            title: Admin username
+            content: admin@cpr.local
