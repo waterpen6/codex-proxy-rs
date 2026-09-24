@@ -2,16 +2,21 @@
 
 ## 一键部署
 
-最终使用方式是打开已发布的 Zeabur 模板链接、选择项目/地区/域名，然后点击部署。
+[![Deploy on Zeabur](https://zeabur.com/button.svg)](https://zeabur.com/templates/ZOHLSK)
+
+打开 [Zeabur 一键部署入口](https://zeabur.com/templates/ZOHLSK)，选择项目/地区/域名，然后点击部署。
 三个服务、随机凭据、跨服务环境变量引用和持久卷全部由模板创建；不需要逐个添加服务或填写连接串。
-以下 CLI 发布步骤仅供本 Fork 的维护者首次建立这个部署入口，普通部署者不需要运行它。
+不需要在本地安装 CLI 或运行命令。直接导入 GitHub 仓库只会创建一个网关服务，不能代替模板部署。
+若已有之前单独导入的网关，建议使用新项目部署整套服务，确认可用后再自行处理旧服务。
+
+以下 CLI 操作仅供维护者使用，普通部署者直接点击上面的按钮即可。
 
 `template.yaml` 一次创建三个服务：从本 Fork 构建的网关、PostgreSQL 18 和 Redis 8。
 Zeabur 不直接运行 Docker Compose；模板复用 `deploy/Dockerfile` 的源码构建阶段，
 根目录 `zbpack.json` 指定 Dockerfile，最后的 `zeabur` 阶段作为部署镜像。
 
-首次使用前，将本次部署改动提交并合入 `waterpen6/codex-proxy-rs` 的 `main`，
-并在 Zeabur 连接 GitHub、授权访问这个仓库。本地修改尚未推送时，远端构建无法使用它们。
+模板从 `waterpen6/codex-proxy-rs` 的 `main` 构建，部署配置已推送。
+部署时若 Zeabur 提示 GitHub 授权，按页面提示授权访问这个仓库。
 
 从仓库根目录运行官方 CLI（需要 Node.js 与 Zeabur 登录）：
 
@@ -24,15 +29,14 @@ npx zeabur@latest template deploy -f deploy/zeabur/template.yaml
 服务启动后，访问所选 HTTPS 域名，用 `admin@cpr.local` 和网关服务说明中的
 `Initial admin password` 登录。再添加上游账号与客户端 Key，API Base URL 为 `https://你的域名/v1`。
 
-需要网页上的“一键部署”按钮时，先发布模板：
+本 Fork 已发布模板 `ZOHLSK`。维护者修改模板后执行：
 
 ```bash
-npx zeabur@latest template create -f deploy/zeabur/template.yaml
+npx zeabur@latest template update -c ZOHLSK -f deploy/zeabur/template.yaml
 ```
 
-CLI 返回真实的 `https://zeabur.com/templates/<模板编号>`，可将它放入 README 作为部署入口。
-模板尚未发布，因此仓库没有虚构的模板编号或不可用的部署按钮。发布模板只提供部署入口，
-不会替代把源码推送到 GitHub，也不等于运行实例已部署。
+发布模板只提供部署入口，不等于运行实例已部署。其他 Fork 的维护者可使用
+`template create -f deploy/zeabur/template.yaml` 创建自己的模板，使用 CLI 返回的真实链接。
 
 再次 Fork 时，修改模板的 `source.repo` 为你的 GitHub 仓库数字 ID，按需修改 `branch`、图标和说明。
 该 ID 可从 GitHub 仓库 API 的 `id` 字段取得，不能填写仓库名称代替。
