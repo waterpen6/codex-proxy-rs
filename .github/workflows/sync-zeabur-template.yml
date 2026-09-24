@@ -1,0 +1,53 @@
+name: Sync Zeabur template
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - deploy/zeabur/template.yaml
+      - .github/workflows/sync-zeabur-template.yml
+  workflow_dispatch:
+  # GITHUB_TOKEN 合并不会触发 push 工作流，使用同步任务的完成事件衔接。
+  workflow_run:
+    workflows: [Sync upstream]
+    types: [completed]
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sync-zeabur-template
+  cancel-in-progress: false
+
+jobs:
+  update:
+    if: >-
+      github.repository == 'waterpen6/codex-proxy-rs' &&
+      (github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      # 仅读取受信任 main，不检出触发事件中的任意分支或下载其制品。
+      - name: Check out current main
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+          persist-credentials: false
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+      - name: Update published template ZOHLSK
+        env:
+          ZEABUR_TOKEN: ${{ secrets.ZEABUR_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "$ZEABUR_TOKEN" ]; then
+            echo '::error::Configure the ZEABUR_TOKEN repository Actions secret.'
+            exit 1
+          fi
+          npx --yes zeabur@0.22.2 template update \
+            --interactive=false \
+            --code ZOHLSK \
+            --file deploy/zeabur/template.yaml

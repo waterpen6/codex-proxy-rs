@@ -29,7 +29,15 @@ npx zeabur@latest template deploy -f deploy/zeabur/template.yaml
 服务启动后，访问所选 HTTPS 域名，用 `admin@cpr.local` 和网关服务说明中的
 `Initial admin password` 登录。再添加上游账号与客户端 Key，API Base URL 为 `https://你的域名/v1`。
 
-本 Fork 已发布模板 `ZOHLSK`。维护者修改模板后执行：
+本 Fork 已发布模板 `ZOHLSK`，由 `Sync Zeabur template` 工作流自动维护：
+
+- `main` 上的 `deploy/zeabur/template.yaml` 或模板同步工作流变更后自动更新。
+- `Sync upstream` 成功结束后自动更新，覆盖 `GITHUB_TOKEN` 合并不触发 push 工作流的情况。
+- 也可在 Actions 手动运行 `Sync Zeabur template`。任务始终读取最新 `main`，更新同一个模板编号。
+
+凭据保存在仓库 Actions Secret `ZEABUR_TOKEN`，不放进源码。Token 失效或撤销后，需更换此 Secret。
+再次 Fork 时还需配置自己的 Token、模板编号与工作流中的仓库限制。
+需要临时手动维护时执行：
 
 ```bash
 npx zeabur@latest template update -c ZOHLSK -f deploy/zeabur/template.yaml
@@ -87,7 +95,9 @@ npx zeabur@latest template update -c ZOHLSK -f deploy/zeabur/template.yaml
 手动同步：打开 GitHub 仓库首页，选择 **Sync fork → Update branch**。存在冲突时需手动解决，
 不要使用丢弃本 Fork 提交的选项。保留 Zeabur 部署改动需要正常合并上游，不能重置成上游分支。
 
-本次新增 `.github/workflows/sync-upstream.yml`，默认关闭定时同步，可按以下步骤启用：
+`.github/workflows/sync-upstream.yml` 使用仓库变量 `ENABLE_UPSTREAM_SYNC` 控制定时同步。
+当前 `waterpen6/codex-proxy-rs` 已配置为 `true`；其他 Fork 默认不会运行。
+维护方式如下：
 
 1. 将工作流合入本 Fork 的默认分支 `main`，在 **Actions** 页面启用 Fork 的工作流。
 2. 在 **Settings → Secrets and variables → Actions → Variables** 添加
@@ -95,14 +105,15 @@ npx zeabur@latest template update -c ZOHLSK -f deploy/zeabur/template.yaml
 3. 工作流每天北京时间 10:17 尝试合并上游 `main`；也可从 **Actions → Sync upstream → Run workflow** 手动运行。
 4. 查看运行结果。冲突、分支保护或权限不足会使任务失败，保留现有分支，不强推、不丢弃本地定制提交。
 
-默认使用 `GITHUB_TOKEN` 和 `contents: write`。它产生的更新通常不会触发其他 GitHub Actions，
-也不能保证 Zeabur 收到自动部署事件；若需要后续 CI/自动部署，配置名为 `UPSTREAM_SYNC_TOKEN` 的
+默认使用 `GITHUB_TOKEN` 和 `contents: write`。模板同步已通过 `workflow_run` 衔接，不依赖 push 事件。
+其他 push 触发的 GitHub Actions 通常仍不会运行，也不能保证 Zeabur 收到运行实例自动部署事件；
+若需要这些后续 CI/自动部署，配置名为 `UPSTREAM_SYNC_TOKEN` 的
 仓库 Secret，使用仅授权本仓库的 fine-grained PAT，授予 Contents 读写；同步涉及工作流文件时还需
 Workflows 读写权限。组织策略与分支保护仍然生效，首次同步后检查 CI 和 Zeabur 部署记录。
 不要把 Token 写进 YAML 或提交到 Git。PAT 到期需要续期。
 
 该方案开启后会直接合并上游；开启 Zeabur 自动部署时也可能自动更新运行服务。
-希望先审阅升级内容时，保持定时同步关闭并手动同步。GitHub 定时任务可能延迟，
+希望先审阅升级内容时，将 `ENABLE_UPSTREAM_SYNC` 设为 `false` 并手动同步。GitHub 定时任务可能延迟，
 公开仓库长期无活动时也可能被停用，可在 Actions 页面重新启用。
 
 ## 官方参考
