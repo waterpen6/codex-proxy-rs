@@ -1,0 +1,255 @@
+# yaml-language-server: $schema=https://schema.zeabur.app/template.json
+apiVersion: zeabur.com/v1
+kind: Template
+metadata:
+  name: Codex Proxy RS
+spec:
+  description: 多账号 AI 网关，自动部署 PostgreSQL、Redis 并配置持久化与随机凭据
+  icon: https://raw.githubusercontent.com/zyycn/codex-proxy-rs/v3.25.0/frontend/public/favicon.svg
+  tags:
+    - Tool
+  variables:
+    - key: PUBLIC_DOMAIN
+      type: DOMAIN
+      name: 访问域名
+      description: 为管理端和 API 选择一个 zeabur.app 域名前缀
+  readme: |
+    模板自动创建网关、PostgreSQL 18 和 Redis 8，不需要自行部署数据库或填写连接环境变量。
+    只需选择域名；部署完成后，在 codex-proxy-rs 服务的连接信息中查看管理员初始密码。
+    管理员账号为 admin@cpr.local，登录后添加上游账号并创建客户端密钥。
+    客户端 Base URL 为访问地址加 /v1，仅支持 Responses API。
+
+    三个服务及持久卷使用你的 Zeabur 资源，按平台规则计费。网关保持单副本。
+    管理员密码在管理端修改；不要重新生成数据库或 Redis 的凭据种子。
+    应用使用固定版本的上游发布镜像，更新通过 Zeabur 更换镜像完成。
+
+    上游项目：https://github.com/zyycn/codex-proxy-rs （Apache-2.0）
+  services:
+    - name: postgres
+      template: PREBUILT_V2
+      spec:
+        source:
+          image: postgres:18-bookworm@sha256:d9c83446333daec3f0588cc709adb80c26090b7f9f0f7ec8d43c243385d79818
+          command:
+            - /bin/sh
+            - /opt/cpr/start-postgres.sh
+        ports:
+          - id: database
+            port: 5432
+            type: TCP
+        portForwarding:
+          enabled: false
+        healthCheck:
+          type: TCP
+          port: database
+        volumes:
+          - id: postgres-data
+            dir: /var/lib/postgresql
+        env:
+          CPR_POSTGRES_HOST:
+            default: ${CONTAINER_HOSTNAME}
+            expose: true
+          CPR_POSTGRES_SEED:
+            default: ${PASSWORD}
+            expose: true
+          POSTGRES_USER:
+            default: codex_proxy
+          POSTGRES_DB:
+            default: codex_proxy
+          POSTGRES_INITDB_ARGS:
+            default: --auth-local=scram-sha-256 --auth-host=scram-sha-256
+          TZ:
+            default: UTC
+        configs:
+          - path: /opt/cpr/start-postgres.sh
+            envsubst: false
+            permission: 292
+            template: |
+              #!/bin/sh
+              set -eu
+              : "${CPR_POSTGRES_SEED:?Missing CPR_POSTGRES_SEED}"
+              # 网关要求 48 位十六进制密码；与应用端使用同一确定性转换
+              digest=$(printf '%s' "$CPR_POSTGRES_SEED" | sha256sum)
+              POSTGRES_PASSWORD=$(printf '%.48s' "$digest")
+              export POSTGRES_PASSWORD
+              unset CPR_POSTGRES_SEED digest
+              exec /usr/local/bin/docker-entrypoint.sh postgres -c timezone=UTC -c log_timezone=UTC
+    - name: redis
+      template: PREBUILT_V2
+      spec:
+        source:
+          image: redis:8-alpine@sha256:9d317178eceac8454a2284a9e6df2466b93c745529947f0cd42a0fa9609d7005
+          command:
+            - /bin/sh
+            - /opt/cpr/start-redis.sh
+        ports:
+          - id: database
+            port: 6379
+            type: TCP
+        portForwarding:
+          enabled: false
+        healthCheck:
+          type: TCP
+          port: database
+        volumes:
+          - id: redis-data
+            dir: /data
+        env:
+          CPR_REDIS_HOST:
+            default: ${CONTAINER_HOSTNAME}
+            expose: true
+          CPR_REDIS_SEED:
+            default: ${PASSWORD}
+            expose: true
+        configs:
+          - path: /opt/cpr/start-redis.sh
+            envsubst: false
+            permission: 292
+            template: |
+              #!/bin/sh
+              set -eu
+              : "${CPR_REDIS_SEED:?Missing CPR_REDIS_SEED}"
+              digest=$(printf '%s' "$CPR_REDIS_SEED" | sha256sum)
+              password=$(printf '%.48s' "$digest")
+              unset CPR_REDIS_SEED digest
+              exec /usr/local/bin/docker-entrypoint.sh redis-server --appendonly yes --requirepass "$password"
+    - name: codex-proxy-rs
+      template: PREBUILT_V2
+      domainKey: PUBLIC_DOMAIN
+      dependencies:
+        - postgres
+        - redis
+      spec:
+        source:
+          image: ghcr.io/zyycn/codex-proxy-rs:3.25.0@sha256:df971c1ff2fb73daf2c02613c9b43e21103b58a1f7a77e6874539d896038b1c1
+          runAsUserID: 10001
+          command:
+            - /bin/sh
+            - /opt/cpr/start-app.sh
+        ports:
+          - id: web
+            port: 8080
+            type: HTTP
+        portForwarding:
+          enabled: false
+        healthCheck:
+          type: HTTP
+          port: web
+          http:
+            path: /healthz
+        volumes:
+          - id: app-runtime
+            dir: /app/.runtime
+        init:
+          - id: runtime-permissions
+            image: redis:8-alpine@sha256:9d317178eceac8454a2284a9e6df2466b93c745529947f0cd42a0fa9609d7005
+            volumes:
+              - id: app-runtime
+                mountPath: /runtime
+            command:
+              - /bin/sh
+              - -ec
+              - |
+                mkdir -p /runtime/data /runtime/logs
+                chown 10001:10001 /runtime /runtime/data /runtime/logs
+                chmod 0700 /runtime /runtime/data /runtime/logs
+        env:
+          CPR_DATABASE_URL:
+            default: postgres://codex_proxy@${CPR_POSTGRES_HOST}:5432/codex_proxy
+          POSTGRES_SEED:
+            default: ${CPR_POSTGRES_SEED}
+          CPR_REDIS_URL:
+            default: redis://${CPR_REDIS_HOST}:6379/0
+          REDIS_SEED:
+            default: ${CPR_REDIS_SEED}
+          CPR_ADMIN_PASSWORD:
+            default: ${PASSWORD}
+          CPR_SERVER_HOST:
+            default: 0.0.0.0
+          CPR_SERVER_PORT:
+            default: '8080'
+          CPR_WEB_DIST_DIR:
+            default: /app/web/dist
+          CPR_ENABLE_SELF_RESTART:
+            default: 'false'
+        instructions:
+          - title: 访问地址
+            content: ${ZEABUR_WEB_URL}
+          - title: 管理员账号
+            content: admin@cpr.local
+          - title: 管理员初始密码
+            type: PASSWORD
+            content: ${CPR_ADMIN_PASSWORD}
+          - title: 客户端 Base URL
+            content: ${ZEABUR_WEB_URL}/v1
+        configs:
+          - path: /opt/cpr/start-app.sh
+            envsubst: false
+            permission: 292
+            template: |
+              #!/bin/sh
+              set -eu
+              umask 077
+              : "${POSTGRES_SEED:?Missing POSTGRES_SEED}"
+              : "${REDIS_SEED:?Missing REDIS_SEED}"
+              : "${CPR_ADMIN_PASSWORD:?Missing CPR_ADMIN_PASSWORD}"
+              : "${CPR_DATABASE_URL:?Missing CPR_DATABASE_URL}"
+              : "${CPR_REDIS_URL:?Missing CPR_REDIS_URL}"
+              digest=$(printf '%s' "$POSTGRES_SEED" | sha256sum)
+              CPR_DATABASE_PASSWORD=$(printf '%.48s' "$digest")
+              digest=$(printf '%s' "$REDIS_SEED" | sha256sum)
+              CPR_REDIS_PASSWORD=$(printf '%.48s' "$digest")
+              export CPR_DATABASE_PASSWORD CPR_REDIS_PASSWORD
+              # 只处理 YAML 编码边界，密码强度仍由应用校验
+              clean_password=$(printf '%s' "$CPR_ADMIN_PASSWORD" | LC_ALL=C tr -d '[:cntrl:]')
+              if [ "$clean_password" != "$CPR_ADMIN_PASSWORD" ]; then
+                printf '%s\n' 'CPR_ADMIN_PASSWORD must not contain control characters' >&2
+                exit 1
+              fi
+              admin_yaml=$(printf '%s' "$CPR_ADMIN_PASSWORD" | sed "s/'/''/g")
+              # 配置随环境重建，业务状态保存在卷中；不覆盖用户的 Compose 配置
+              mkdir -p /tmp/cpr/deploy
+              cat > /tmp/cpr/deploy/config.yaml <<EOF
+              schema_version: 1
+              host:
+                timezone: 'Asia/Shanghai'
+                listen:
+                  host: '0.0.0.0'
+                  port: 8080
+                runtime_data_dir: '/app/.runtime/data'
+                logging:
+                  level: 'info'
+                  stdout: true
+                  file:
+                    enabled: false
+                    directory: '/app/.runtime/logs'
+                    retention_days: 7
+                    max_file_size_mb: 20
+                system_update:
+                  deployment_mode: 'docker'
+                  self_restart_enabled: false
+              store:
+                database:
+                  url: 'postgres://codex_proxy@localhost:5432/codex_proxy'
+                  password: ''
+                redis:
+                  url: 'redis://localhost:6379/0'
+                  password: ''
+              admin:
+                session_ttl_minutes: 10080
+                session_absolute_ttl_minutes: 43200
+                default_username: 'admin@cpr.local'
+                default_password: '$admin_yaml'
+              client:
+                session_ttl_minutes: 1440
+              api:
+                asset_directory: '/app/web/dist'
+                cors_allowed_origins: []
+                request_timeout_seconds: null
+                request_id_header: 'x-request-id'
+              openai:
+                residency: us
+              EOF
+              unset POSTGRES_SEED REDIS_SEED CPR_POSTGRES_SEED CPR_REDIS_SEED CPR_ADMIN_PASSWORD digest clean_password admin_yaml
+              cd /tmp/cpr
+              exec /app/bin/codex-proxy-rs

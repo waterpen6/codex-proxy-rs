@@ -36,6 +36,14 @@
 
 ## 快速开始
 
+### Zeabur 模板部署
+
+使用 [Zeabur 模板](deploy/zeabur.yaml) 一次创建网关、PostgreSQL 和 Redis，自动生成凭据、连接服务并挂载持久卷，部署时只需选择访问域名
+
+导入与发布步骤见 [Zeabur 部署](deploy/README.md#zeabur-模板部署)。部署完成后，在应用服务的连接信息中查看管理员初始密码
+
+### Docker Compose 部署
+
 使用 Docker Compose 部署版本固定的发布镜像，同时启动 PostgreSQL 和 Redis
 
 以下命令适用于 Linux amd64/arm64，需要 Docker Engine、Docker Compose Plugin、curl 和 OpenSSL
