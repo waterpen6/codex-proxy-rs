@@ -22,6 +22,8 @@ spec:
     三个服务及持久卷使用你的 Zeabur 资源，按平台规则计费。网关保持单副本。
     管理员密码在管理端修改；不要重新生成数据库或 Redis 的凭据种子。
     应用使用固定版本的上游发布镜像，更新通过 Zeabur 更换镜像完成。
+    部署后保留 Docker 镜像来源，不要将应用服务连接到 GitHub 仓库。
+    直接连接仓库根目录会被自动识别为静态站点，启动 Caddy 并返回 404。
 
     上游项目：https://github.com/zyycn/codex-proxy-rs （Apache-2.0）
   services:
