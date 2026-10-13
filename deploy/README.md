@@ -19,6 +19,8 @@
 
 ### 导入与登录
 
+打开 [Zeabur 一键部署页面](https://zeabur.com/templates/RF09H0)，选择部署位置并填写域名前缀，即可创建全部三个服务
+
 在已登录的 Zeabur CLI 中，从仓库根目录部署本地模板：
 
 ```bash

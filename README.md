@@ -38,7 +38,9 @@
 
 ### Zeabur 模板部署
 
-使用 [Zeabur 模板](deploy/zeabur.yaml) 一次创建网关、PostgreSQL 和 Redis，自动生成凭据、连接服务并挂载持久卷，部署时只需选择访问域名
+[在 Zeabur 一键部署](https://zeabur.com/templates/RF09H0)
+
+模板一次创建网关、PostgreSQL 和 Redis，自动生成凭据、连接服务并挂载持久卷，部署时只需选择访问域名。模板定义见 [zeabur.yaml](deploy/zeabur.yaml)
 
 导入与发布步骤见 [Zeabur 部署](deploy/README.md#zeabur-模板部署)。部署完成后，在应用服务的连接信息中查看管理员初始密码
 
