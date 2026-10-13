@@ -1394,7 +1394,7 @@ fn planned_request_with_presentation(
     }
     let snapshot = RuntimeSnapshot::new(
         ConfigRevision::new(1).expect("revision"),
-        gateway_core::settings::SettingsValues::new(2, 10, "smart", Default::default(), None, None),
+        gateway_core::settings::SettingsValues::new(2, "smart", Default::default(), None, None),
         vec![provider],
         vec![catalog_model],
         Vec::new(),
@@ -1423,7 +1423,7 @@ fn planned_provider_endpoint_request(provider_name: &str, operation: Operation) 
     ));
     let snapshot = RuntimeSnapshot::new(
         ConfigRevision::new(1).expect("revision"),
-        gateway_core::settings::SettingsValues::new(2, 10, "smart", Default::default(), None, None),
+        gateway_core::settings::SettingsValues::new(2, "smart", Default::default(), None, None),
         vec![provider.clone()],
         Vec::new(),
         Vec::new(),
@@ -4374,7 +4374,10 @@ async fn websocket_idle_timeout_diagnosis_survives_ambiguous_send_wrapping() {
             .await
             .expect("partial response")
             .expect("valid partial response");
-        if event.has_client_event() {
+        if event
+            .wire_event()
+            .is_some_and(|wire| wire.event_type() == Some("response.output_text.delta"))
+        {
             break;
         }
     }
@@ -4593,7 +4596,7 @@ async fn ambiguous_websocket_close_reconnects_and_retains_native_continuation() 
         websocket
             .send(Message::Text(
                 json!({
-                    "type": "response.output_item.added",
+                    "type": "response.in_progress",
                     "output_index": 0,
                     "item": {
                         "id": "msg_structural",
@@ -4710,8 +4713,8 @@ async fn ambiguous_websocket_close_reconnects_and_retains_native_continuation() 
                     }
                 }
                 assert!(
-                    !event.has_client_event(),
-                    "structural events must remain behind the replay boundary"
+                    !event.has_client_event() || event.is_replayable_prelude(),
+                    "delivered preludes preserve the replay boundary"
                 );
             }
             Some(Err(error)) => break error,
@@ -4736,7 +4739,7 @@ async fn ambiguous_websocket_close_reconnects_and_retains_native_continuation() 
     assert_eq!(
         error.diagnostic().map(|diagnostic| diagnostic.as_str()),
         Some(
-            "OpenAI WebSocket closed before a terminal response (close code 1000); last event type: response.output_item.added"
+            "OpenAI WebSocket closed before a terminal response (close code 1000); last event type: response.in_progress"
         )
     );
     let raw_close: Value = serde_json::from_str(
@@ -4751,7 +4754,7 @@ async fn ambiguous_websocket_close_reconnects_and_retains_native_continuation() 
     assert_eq!(raw_close.get("reason"), Some(&json!("")));
     assert_eq!(
         raw_close.get("last_event_type"),
-        Some(&json!("response.output_item.added"))
+        Some(&json!("response.in_progress"))
     );
     let connection = error
         .connection_observation()
@@ -8963,7 +8966,11 @@ async fn capacity_feedback_in_stream_only_counts_explicit_overload() {
                 original
             );
             if !semantic_output {
-                assert!(client_events.is_empty());
+                assert!(
+                    client_events
+                        .iter()
+                        .all(|event| event.is_replayable_prelude())
+                );
             }
             client_events.extend(error.take_atomic_client_events());
             let wire = client_events
@@ -8980,7 +8987,7 @@ async fn capacity_feedback_in_stream_only_counts_explicit_overload() {
 }
 
 #[tokio::test]
-async fn ordinary_request_should_hold_created_until_later_failure_can_rotate() {
+async fn ordinary_request_forwards_created_and_preserves_later_rotation() {
     let store = Arc::new(MemoryAccountStore::default());
     create_account(&store, "acct_first_event_latency").await;
     let (base_url, release, first_chunk_sent, server) = paused_chunked_sse_server(
@@ -9004,39 +9011,18 @@ async fn ordinary_request_should_hold_created_until_later_failure_can_rotate() {
         .await
         .expect("prepare provider stream");
 
-    let mut first_chunk_sent = Box::pin(first_chunk_sent);
-    loop {
-        tokio::select! {
-            sent = &mut first_chunk_sent => {
-                sent.expect("first upstream chunk");
-                break;
-            }
-            next = stream.next() => {
-                let event = next
-                    .expect("provider stream must stay open")
-                    .expect("provider event");
-                assert!(!event.has_client_event(), "response.created must remain replayable");
-            }
-        }
-    }
-
-    let exposed = timeout(Duration::from_millis(100), async {
-        loop {
-            let next = stream
-                .next()
-                .await
-                .expect("provider stream must stay open")
-                .expect("provider event");
-            if next.has_client_event() {
-                return next;
-            }
-        }
-    })
-    .await;
-    assert!(
-        exposed.is_err(),
-        "a structural event must not commit the downstream before a later 429"
+    let created = timeout(
+        Duration::from_secs(1),
+        precommit::next_client_event(&mut stream),
+    )
+    .await
+    .expect("created must arrive before the next upstream chunk");
+    assert_eq!(
+        created.wire_event().unwrap().event_type(),
+        Some("response.created")
     );
+    assert!(created.is_replayable_prelude());
+    first_chunk_sent.await.expect("first chunk sent");
 
     release.send(()).expect("release second upstream chunk");
     let mut failure = loop {
@@ -9060,13 +9046,13 @@ async fn ordinary_request_should_hold_created_until_later_failure_can_rotate() {
             .iter()
             .filter_map(|event| event.wire_event()?.event_type())
             .collect::<Vec<_>>(),
-        vec!["response.created", "response.failed"]
+        vec!["response.failed"]
     );
     server.await.expect("chunked SSE server");
 }
 
 #[tokio::test]
-async fn ordinary_request_should_hold_structural_events_until_upstream_finishes() {
+async fn ordinary_request_forwards_structural_events_before_upstream_finishes() {
     let store = Arc::new(MemoryAccountStore::default());
     create_account(&store, "acct_bounded_replay_grace").await;
     let (base_url, release, _first_chunk_sent, server) = paused_chunked_sse_server(
@@ -9086,29 +9072,29 @@ async fn ordinary_request_should_hold_structural_events_until_upstream_finishes(
         .await
         .expect("prepare provider stream");
 
-    assert!(
-        timeout(Duration::from_secs(3), async {
-            while let Some(event) = stream.next().await {
-                assert!(!event.expect("provider event").has_client_event());
-            }
-        })
-        .await
-        .is_err()
+    let created = timeout(
+        Duration::from_secs(1),
+        precommit::next_client_event(&mut stream),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        created.wire_event().unwrap().event_type(),
+        Some("response.created")
     );
+    assert!(created.is_replayable_prelude());
     release.send(()).expect("finish upstream response");
     let events = stream.collect::<Vec<_>>().await;
-    assert!(events.iter().any(|event| {
-        event
-            .as_ref()
-            .unwrap()
-            .wire_event()
-            .is_some_and(|wire| wire.event_type() == Some("response.created"))
-    }));
+    assert!(
+        events
+            .iter()
+            .all(|event| !event.as_ref().unwrap().has_client_event())
+    );
     server.await.expect("chunked SSE server");
 }
 
 #[tokio::test]
-async fn continuation_should_hold_created_until_semantic_output() {
+async fn continuation_forwards_created_before_semantic_output() {
     let store = Arc::new(MemoryAccountStore::default());
     create_account(&store, "acct_continuation_prefetch").await;
     let (base_url, release, first_chunk_sent, server) = paused_chunked_sse_server(
@@ -9137,42 +9123,24 @@ async fn continuation_should_hold_created_until_semantic_output() {
         .await
         .expect("prepare provider stream");
 
-    let mut first_chunk_sent = Box::pin(first_chunk_sent);
-    loop {
-        tokio::select! {
-            sent = &mut first_chunk_sent => {
-                sent.expect("first upstream chunk");
-                break;
-            }
-            next = stream.next() => {
-                let event = next
-                    .expect("provider stream must stay open")
-                    .expect("provider event");
-                assert!(!event.has_client_event(), "created was exposed before the first chunk barrier");
-            }
-        }
-    }
-
-    let blocked = timeout(Duration::from_millis(100), async {
-        loop {
-            let next = stream
-                .next()
-                .await
-                .expect("provider stream must stay open")
-                .expect("provider event");
-            if next.has_client_event() {
-                return next;
-            }
-        }
-    })
-    .await;
-    assert!(blocked.is_err());
+    let created = timeout(
+        Duration::from_secs(1),
+        precommit::next_client_event(&mut stream),
+    )
+    .await
+    .expect("created must arrive before the next upstream chunk");
+    assert_eq!(
+        created.wire_event().unwrap().event_type(),
+        Some("response.created")
+    );
+    assert!(created.is_replayable_prelude());
+    first_chunk_sent.await.expect("first chunk sent");
 
     release.send(()).expect("release semantic output chunk");
     let first_event = loop {
         let next = timeout(Duration::from_secs(1), stream.next())
             .await
-            .expect("semantic output must release the prefetched batch")
+            .expect("semantic output arrives after release")
             .expect("provider stream must stay open")
             .expect("provider event");
         if next.has_client_event() {
@@ -9181,7 +9149,7 @@ async fn continuation_should_hold_created_until_semantic_output() {
     };
     assert_eq!(
         first_event.wire_event().and_then(|wire| wire.event_type()),
-        Some("response.created")
+        Some("response.content_part.added")
     );
     while let Some(event) = stream.next().await {
         event.expect("continuation response must complete");
@@ -9595,7 +9563,7 @@ async fn exact_websocket_busy_then_replay_scope_relaxation_is_rejected_before_se
 }
 
 #[tokio::test]
-async fn continuation_prefetch_over_128_kib_stays_buffered_until_eof_without_protocol_failure() {
+async fn large_continuation_prelude_is_delivered_before_eof_without_protocol_failure() {
     let store = Arc::new(MemoryAccountStore::default());
     create_account(&store, "acct_prefetch_limit").await;
     let padding = "x".repeat(128 * 1024);
@@ -9622,36 +9590,13 @@ async fn continuation_prefetch_over_128_kib_stays_buffered_until_eof_without_pro
         )
         .await
         .expect("prepare provider stream");
-    let visible = {
-        let next_visible = async {
-            loop {
-                let event = stream
-                    .next()
-                    .await
-                    .expect("provider stream remains open")
-                    .expect("large prefetch cannot create a protocol failure");
-                if event.has_client_event() {
-                    break event;
-                }
-            }
-        };
-        tokio::pin!(next_visible);
-        assert!(
-            timeout(Duration::from_secs(1), next_visible.as_mut())
-                .await
-                .is_err(),
-            "large structural events must remain buffered before semantic output"
-        );
-        assert!(
-            timeout(Duration::from_secs(3), next_visible.as_mut())
-                .await
-                .is_err()
-        );
-        release.send(()).expect("finish upstream response");
-        timeout(Duration::from_secs(1), next_visible)
-            .await
-            .expect("EOF releases original wire")
-    };
+    let visible = timeout(
+        Duration::from_secs(1),
+        precommit::next_client_event(&mut stream),
+    )
+    .await
+    .expect("large prelude is delivered before EOF");
+    release.send(()).expect("finish upstream response");
 
     assert_eq!(
         visible.wire_event().and_then(|wire| wire.event_type()),
@@ -10415,6 +10360,18 @@ async fn connection_limit_rejection_requests_one_provider_retry_and_reconnects_i
             let (stream, _) = listener.accept().await.expect("accept WS");
             let mut ws = accept_codex_test_websocket(stream).await;
             ws.next().await.expect("request").expect("valid frame");
+            // 真实上游先发送元数据，随后仍可能在空前导后拒绝连接寿命
+            if first {
+                for event in [
+                    json!({"type":"codex.response.metadata","model":"gpt-5.4"}),
+                    json!({"type":"response.created","response":{"id":"resp_expired","output":[]}}),
+                    json!({"type":"response.in_progress","response":{"id":"resp_expired","output":[]}}),
+                ] {
+                    ws.send(Message::Text(event.to_string().into()))
+                        .await
+                        .expect("prelude");
+                }
+            }
             let event = if first {
                 json!({"type":"error","status":400,"headers":{"x-request-id":"req-limit-retry"},"error":{"code":"websocket_connection_limit_reached","type":"invalid_request_error","message":"connection expired"}})
             } else {
@@ -10725,6 +10682,7 @@ async fn assert_websocket_failure_headers(headers: Value, request_id: Option<&st
         )
         .await
         .expect("prepare");
+    let mut delivered = Vec::new();
     let mut observation = None;
     let mut error = timeout(Duration::from_secs(5), async {
         loop {
@@ -10733,6 +10691,7 @@ async fn assert_websocket_failure_headers(headers: Value, request_id: Option<&st
                     if let Some(current) = event.response_observation() {
                         observation = Some(current.clone());
                     }
+                    delivered.push(event);
                 }
                 Some(Err(error)) => break error,
                 None => panic!("expected error"),
@@ -10765,7 +10724,8 @@ async fn assert_websocket_failure_headers(headers: Value, request_id: Option<&st
     assert_eq!(error.send_state(), UpstreamSendState::Sent);
     assert!(!error.replay_is_safe());
     assert_eq!(error.raw_upstream_error().expect("raw error").as_str(), raw);
-    let events = error.take_atomic_client_events();
+    delivered.extend(error.take_atomic_client_events());
+    let events = delivered;
     let event_type = if reuse { "response.failed" } else { "error" };
     assert_eq!(
         events
@@ -10773,7 +10733,7 @@ async fn assert_websocket_failure_headers(headers: Value, request_id: Option<&st
             .filter_map(|event| event.wire_event()?.event_type())
             .collect::<Vec<_>>(),
         vec!["response.metadata", event_type],
-        "original metadata and failure stay atomically deliverable",
+        "original metadata and failure are delivered in order",
     );
     let wire = events
         .iter()
@@ -11633,7 +11593,9 @@ async fn quota_continuation_stream_rejection_only_projects_before_delivery() {
                 client_events.extend(error.take_atomic_client_events());
                 if native_continuation && !semantic_output {
                     assert!(
-                        client_events.is_empty(),
+                        client_events
+                            .iter()
+                            .all(|event| event.is_replayable_prelude()),
                         "raw quota error must not override replay projection"
                     );
                     assert_eq!(
@@ -11694,15 +11656,17 @@ async fn late_quota_continuation_rejection_requires_client_replay_before_output(
         )
         .await
         .unwrap();
-    assert!(
-        timeout(Duration::from_secs(3), async {
-            while let Some(event) = stream.next().await {
-                assert!(!event.unwrap().has_client_event());
-            }
-        })
-        .await
-        .is_err()
+    let created = timeout(
+        Duration::from_secs(1),
+        precommit::next_client_event(&mut stream),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        created.wire_event().unwrap().event_type(),
+        Some("response.created")
     );
+    assert!(created.is_replayable_prelude());
     release.send(()).unwrap();
     let mut delivered_failure = false;
     let error = loop {
@@ -12718,7 +12682,6 @@ async fn public_catalog_filters_each_api_account_before_union_without_gating_inf
             revision,
             SettingsValues::new(
                 3,
-                0,
                 "smart",
                 BTreeMap::from([
                     ("gpt-public".into(), "gpt-5.4".into()),

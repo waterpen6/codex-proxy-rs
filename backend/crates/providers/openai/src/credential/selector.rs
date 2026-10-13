@@ -272,9 +272,6 @@ impl AffinitySelection {
             PreferredAccountSelection::Blocked(AccountSchedulingBlocker::ConcurrencyLimit) => {
                 self.escape(AffinityEscapeReason::LeaseSaturated);
             }
-            PreferredAccountSelection::Blocked(AccountSchedulingBlocker::RequestInterval) => {
-                self.escape(AffinityEscapeReason::Cooldown);
-            }
             PreferredAccountSelection::Blocked(AccountSchedulingBlocker::LowerWeight) => {
                 self.escape(AffinityEscapeReason::HigherPriority);
             }
@@ -850,7 +847,6 @@ impl CodexCredentialSelector {
                             selection.preferred(),
                             PreferredAccountSelection::Blocked(
                                 AccountSchedulingBlocker::ConcurrencyLimit
-                                    | AccountSchedulingBlocker::RequestInterval
                                     | AccountSchedulingBlocker::Excluded
                             )
                         )
@@ -922,7 +918,7 @@ impl CodexCredentialSelector {
                     .ok_or(CredentialSelectionError::InvalidCredential(None))?;
                 // 凭据、状态或额度结论的并发更新会使账号快照失效，必须重新选号并校验资格；
                 // 仅额度观测时刻前进时沿用最新快照
-                // 在占用租约和请求间隔前完成校验，避免重读被自己的异步释放挡住
+                // 在占用租约前完成校验，避免重读被自己的异步释放挡住
                 let (account, runtime) = match self
                     .repository
                     .reload_selected_credential(&account)
@@ -949,7 +945,6 @@ impl CodexCredentialSelector {
                             account.id().clone(),
                             account.revision(),
                             context.concurrency_limit(&account),
-                            policy.request_interval(),
                             request.attempt.deadline(),
                         )
                         .with_concurrency_pool(concurrency_pool)

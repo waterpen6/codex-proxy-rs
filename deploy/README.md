@@ -104,6 +104,10 @@ PostgreSQL 服务端版本与应用镜像的 `pg_dump` / `pg_restore` 应保持�
 配置加载会忽略未知字段，并在启动控制台提示字段名；不输出对应值。缺少必填字段时会指出缺项并停止启动，
 已知字段的类型和取值仍需合法；可选字段省略时使用默认值
 
+`store.pool.observability_timeout_seconds` 默认 120 秒，控制观测查询与统计 Worker 的操作预算，
+缓存等待和统计事务的 SQL 时限沿用该配置。修改后重启应用；连接排队仍受
+`store.pool.acquire_timeout_seconds` 约束，模型请求时限由 `api.request_timeout_seconds` 单独控制
+
 后端从当前目录向上查找 `deploy/config.yaml`，相对数据、日志和静态资源路径以该文件所在目录解析
 
 Compose 通过环境变量将监听和数据库地址设为容器内地址，并指定镜像中的静态资源目录

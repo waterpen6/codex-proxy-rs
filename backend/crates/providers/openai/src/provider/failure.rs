@@ -1,7 +1,7 @@
 //! OpenAI 上游失败分类、恢复决策与稳定错误投影
 
 use super::*;
-use gateway_core::diagnostics::TraceContext;
+use crate::transport::protocol::responses::is_replaceable_response_prelude;
 
 /// OpenAI 失败对 Smart 账号分数的结构化 reason 闭集
 ///
@@ -69,128 +69,50 @@ impl MappedProviderFailure {
     }
 }
 
-/// 提交边界前的上游事件预取
-///
-/// 原生 Lite 双向通道立即交付正常事件，其他通道保留到语义输出、终态或 EOF
-/// committed 只表示重放窗口已结束，不等同于首次 wire 已交付
-pub(super) struct PreCommitClientEvents {
-    pending: Vec<ProviderEvent>,
-    prefetched_bytes: usize,
-    started_at: tokio::time::Instant,
-    committed: bool,
+/// 正常事件立即交付，只记录后续失败能否请求重放
+/// 可替换前导不关闭窗口；实际输出、终态和未知事件使边界单向推进
+pub(super) struct ClientEventDelivery {
+    replay_closed: bool,
     replayable_prelude: bool,
-    trace: TraceContext,
 }
 
-#[derive(Clone, Copy, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub(super) enum PreCommitReleaseReason {
-    SemanticOutput,
-    NonReplayableEvent,
-    Terminal,
-    Eof,
-}
-
-impl PreCommitClientEvents {
-    pub(super) fn new(trace: TraceContext) -> Self {
+impl ClientEventDelivery {
+    pub(super) fn new(replayable_prelude: bool) -> Self {
         Self {
-            pending: Vec::new(),
-            prefetched_bytes: 0,
-            started_at: tokio::time::Instant::now(),
-            committed: false,
-            replayable_prelude: false,
-            trace,
+            replay_closed: false,
+            replayable_prelude,
         }
     }
 
-    pub(super) fn with_replayable_prelude(mut self, enabled: bool) -> Self {
-        self.replayable_prelude = enabled;
-        self
-    }
-
-    pub(super) fn observe_chunk(&mut self, bytes: usize) {
-        if !self.committed {
-            self.prefetched_bytes = self.prefetched_bytes.saturating_add(bytes);
-        }
-    }
-
-    pub(super) fn stage(
+    pub(super) fn forward(
         &mut self,
         incoming: Vec<ProviderEvent>,
         timing_signals: ResponseEventSignals,
         completed: bool,
     ) -> Vec<ProviderEvent> {
-        if self.committed {
+        if self.replay_closed || incoming.is_empty() {
             return incoming;
         }
-        self.pending.extend(incoming);
-        if timing_signals.semantic_output {
-            return self.commit_pending(PreCommitReleaseReason::SemanticOutput);
+        if timing_signals.semantic_output
+            || completed
+            || !self.replayable_prelude
+            || !incoming.iter().all(is_replaceable_prelude)
+        {
+            return self.commit(incoming);
         }
-        if completed {
-            return self.commit_pending(PreCommitReleaseReason::Terminal);
-        }
-        if self.replayable_prelude {
-            // 未确认可重放的事件也立即交付，但后续前导不能重新开启重试窗口
-            if !self.pending.iter().all(is_replaceable_prelude) {
-                return self.commit_pending(PreCommitReleaseReason::NonReplayableEvent);
-            }
-            self.prefetched_bytes = 0;
-            return std::mem::take(&mut self.pending)
-                .into_iter()
-                .map(ProviderEvent::with_replayable_prelude)
-                .collect();
-        }
-        Vec::new()
-    }
-
-    pub(super) fn finish(
-        &mut self,
-        incoming: Vec<ProviderEvent>,
-        timing_signals: ResponseEventSignals,
-        completed: bool,
-    ) -> Vec<ProviderEvent> {
-        let mut events = self.stage(incoming, timing_signals, completed);
-        if !self.committed {
-            events.extend(self.commit_pending(PreCommitReleaseReason::Eof));
-        }
-        events
+        incoming
+            .into_iter()
+            .map(ProviderEvent::with_replayable_prelude)
+            .collect()
     }
 
     pub(super) fn commit(&mut self, incoming: Vec<ProviderEvent>) -> Vec<ProviderEvent> {
-        if self.committed {
-            return incoming;
-        }
-        self.pending.extend(incoming);
-        // 此入口只在同批次已出现语义输出、随后失败时释放原始事件
-        self.commit_pending(PreCommitReleaseReason::SemanticOutput)
+        self.replay_closed = true;
+        incoming
     }
 
-    pub(super) fn take_for_failure(&mut self, incoming: Vec<ProviderEvent>) -> Vec<ProviderEvent> {
-        self.pending.extend(incoming);
-        self.prefetched_bytes = 0;
-        std::mem::take(&mut self.pending)
-    }
-
-    pub(super) const fn is_committed(&self) -> bool {
-        self.committed
-    }
-
-    pub(super) fn commit_pending(&mut self, reason: PreCommitReleaseReason) -> Vec<ProviderEvent> {
-        // Provider 只记录释放缓存的原因；实际下游提交仍由 Core 记录和裁决
-        if self.trace.is_enabled() {
-            self.trace.record(
-                "provider.precommit.released",
-                json!({
-                    "reason": reason,
-                    "prefetchedBytes": self.prefetched_bytes,
-                    "waitMs": self.started_at.elapsed().as_millis(),
-                }),
-            );
-        }
-        self.committed = true;
-        self.prefetched_bytes = 0;
-        std::mem::take(&mut self.pending)
+    pub(super) const fn replay_closed(&self) -> bool {
+        self.replay_closed
     }
 }
 
@@ -198,12 +120,14 @@ fn is_replaceable_prelude(event: &ProviderEvent) -> bool {
     event
         .wire_event()
         .is_some_and(|wire| match wire.event_type() {
-            Some("codex.response.metadata" | "codex.rate_limits") => true,
-            Some("response.created" | "response.in_progress") => wire
-                .data()
-                .pointer("/response/output")
-                .is_none_or(|output| output.as_array().is_some_and(Vec::is_empty)),
-            _ => false,
+            Some(event_type) => is_replaceable_response_prelude(event_type, wire.data()),
+            // 上游 SSE 注释也即时透传，但不能把传输心跳当作业务交付
+            None => wire.raw_sse_frame().is_some_and(|frame| {
+                std::str::from_utf8(frame).is_ok_and(|text| {
+                    text.lines()
+                        .all(|line| line.is_empty() || line.starts_with(':'))
+                })
+            }),
         })
 }
 

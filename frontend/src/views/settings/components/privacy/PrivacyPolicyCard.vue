@@ -54,7 +54,7 @@ function move(index: number, step: number) {
 </script>
 
 <template>
-  <ZCard id="privacy-policy" title="Codex 隐私策略" description="按自定义规则替换或移除请求中的隐私信息">
+  <ZCard id="privacy-policy" title="隐私策略" description="按自定义规则替换或移除 Codex 请求中的隐私信息">
     <template #actions>
       <ZSwitch v-model="model.enabled" aria-label="启用请求规则" active-text="启用" inactive-text="关闭" inline-prompt :width="56" :disabled="disabled" />
     </template>

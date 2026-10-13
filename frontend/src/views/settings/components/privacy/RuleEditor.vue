@@ -197,10 +197,10 @@ async function apply() {
       </section>
     </div>
     <template #footer>
-      <ZButton size="small" @click="open = false">
+      <ZButton @click="open = false">
         取消
       </ZButton>
-      <ZButton size="small" type="primary" :loading="loading" :disabled="disabled" @click="apply">
+      <ZButton type="primary" :loading="loading" :disabled="disabled" @click="apply">
         应用到草稿
       </ZButton>
     </template>

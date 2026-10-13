@@ -105,12 +105,18 @@ async fn ordinary_stream_failures_preserve_original_events_without_proxy_retry()
                 )
                 .await
                 .unwrap();
-            let (events, mut error) = stream_failure(&mut stream).await;
-            assert!(events.iter().all(|event| !event.has_client_event()));
+            let (mut events, mut error) = stream_failure(&mut stream).await;
+            assert!(
+                events
+                    .iter()
+                    .filter(|event| event.has_client_event())
+                    .all(|event| event.is_replayable_prelude())
+            );
             assert!(error.retry_is_prohibited());
             assert!(error.pre_delivery_retry().is_none());
             assert_eq!(error.retry_after(), Some(Duration::from_secs(17)));
-            let atomic = error.take_atomic_client_events();
+            events.extend(error.take_atomic_client_events());
+            let atomic = events;
             assert_eq!(
                 atomic
                     .iter()

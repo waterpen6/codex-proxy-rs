@@ -559,12 +559,10 @@ impl AttemptContext {
         self.request.client_transport
     }
 
-    /// 原生双向通道可提前交付可替换前导事件；中间件可能改变其输出语义
+    /// 原生响应可交付可替换前导事件；中间件可能改变其输出语义
     #[must_use]
     pub fn allows_replayable_prelude(&self) -> bool {
-        self.client_transport() == execution::ClientTransport::WebSocket
-            && self.request.middleware.is_none()
-            && self.response_control().is_some()
+        self.request.middleware.is_none()
     }
 
     #[must_use]
