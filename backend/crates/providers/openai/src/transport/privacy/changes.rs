@@ -1,4 +1,4 @@
-//! 暂存单条规则改动的正文片段，校验最终大小后统一提交
+//! 暂存处理步骤的正文片段，规则级事务负责提交与回滚
 
 use serde_json::Value;
 
@@ -57,13 +57,72 @@ impl BodyChanges {
             .ok_or("请求或预览样本超出大小限制")
     }
 
-    pub(super) fn commit(self, body: &mut Value) {
-        // 路径来自本条规则执行前的正文，片段互不包含且提交前正文尚未改写
+    pub(super) fn commit(self, transaction: &mut BodyTransaction<'_>) {
+        // 路径来自本步骤执行前的正文，片段互不包含且提交前正文尚未改写
         // 仅替换值，不增删这些路径的祖先，因此先前替换不会使后续路径失效
         for (path, next) in self.replacements {
-            if let Some(target) = body.pointer_mut(&path) {
-                *target = next;
+            transaction.replace(path, next);
+        }
+    }
+}
+
+/// 规则内的后续步骤读取前序结果，失败或取消时恢复首次改写前的片段
+pub(super) struct BodyTransaction<'a> {
+    pub(super) body: &'a mut Value,
+    originals: Vec<(String, Value)>,
+}
+
+impl<'a> BodyTransaction<'a> {
+    pub(super) const fn new(body: &'a mut Value) -> Self {
+        Self {
+            body,
+            originals: Vec::new(),
+        }
+    }
+
+    fn replace(&mut self, path: String, next: Value) {
+        let Some(target) = self.body.pointer_mut(&path) else {
+            return;
+        };
+        let mut original = std::mem::replace(target, next);
+        // 已记录祖先时无需重复保存后代，避免多步骤反复保留整份正文
+        if self
+            .originals
+            .iter()
+            .any(|(parent, _)| contains(parent, &path))
+        {
+            return;
+        }
+        self.originals.retain_mut(|(child, value)| {
+            if !contains(&path, child) {
+                return true;
+            }
+            if let Some(target) = original.pointer_mut(&child[path.len()..]) {
+                *target = std::mem::take(value);
+            }
+            false
+        });
+        self.originals.push((path, original));
+    }
+
+    pub(super) fn finish(mut self) {
+        self.originals.clear();
+    }
+}
+
+impl Drop for BodyTransaction<'_> {
+    fn drop(&mut self) {
+        for (path, original) in self.originals.drain(..) {
+            if let Some(target) = self.body.pointer_mut(&path) {
+                *target = original;
             }
         }
     }
+}
+
+fn contains(parent: &str, child: &str) -> bool {
+    child == parent
+        || child
+            .strip_prefix(parent)
+            .is_some_and(|rest| rest.starts_with('/'))
 }

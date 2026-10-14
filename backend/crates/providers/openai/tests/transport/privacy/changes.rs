@@ -97,22 +97,98 @@ fn body_deletion_invalidates_context_positions_between_rules() {
 }
 
 #[test]
+fn aggregate_body_deletion_invalidates_context_positions_between_steps() {
+    let mut grouped = rule(
+        PrivacyScope::DesktopGitContext,
+        "$.first",
+        PrivacyAction::RemoveField,
+    );
+    grouped.steps.extend([
+        super::step(
+            PrivacyScope::RequestBody,
+            "$.input[0]",
+            PrivacyAction::RemoveField,
+        ),
+        super::step(
+            PrivacyScope::DesktopGitContext,
+            "$.last",
+            PrivacyAction::RemoveField,
+        ),
+    ]);
+    let output = preview(sample(
+        vec![grouped],
+        json!({"input":[
+            git_item(json!({"first":1})), git_item(json!({"first":1,"last":2,"keep":true}))
+        ]}),
+    ))
+    .unwrap();
+    assert_eq!(output.outcomes.len(), 1);
+    assert_eq!(output.outcomes[0].matches, 4);
+    assert_eq!(
+        output.body,
+        json!({"input":[git_item(json!({"keep":true}))]})
+    );
+}
+
+#[test]
+fn failed_aggregate_discards_context_index_before_next_rule() {
+    let mut grouped = rule(
+        PrivacyScope::DesktopGitContext,
+        "$.first",
+        PrivacyAction::RemoveField,
+    );
+    grouped.steps.extend([
+        super::step(
+            PrivacyScope::RequestBody,
+            "$.input[0]",
+            PrivacyAction::RemoveField,
+        ),
+        super::step(
+            PrivacyScope::DesktopGitContext,
+            "$.last",
+            PrivacyAction::RegexReplace,
+        ),
+    ]);
+    grouped.steps[2].pattern = Some("private".into());
+    let mut last = rule(
+        PrivacyScope::DesktopGitContext,
+        "$.last",
+        PrivacyAction::RemoveField,
+    );
+    last.id = "last".into();
+    let mut request = sample(
+        vec![grouped, last],
+        json!({"input":[
+            git_item(json!({"first":1,"last":1})), git_item(json!({"first":2,"last":2}))
+        ]}),
+    );
+    request.policy.on_error = PrivacyFailureMode::SkipRule;
+    let output = preview(request).unwrap();
+    assert_eq!(output.outcomes[0].status, "skipped");
+    assert_eq!(output.outcomes[1].matches, 2);
+    assert_eq!(
+        output.body,
+        json!({"input":[git_item(json!({"first":1})),git_item(json!({"first":2}))]})
+    );
+}
+
+#[test]
 fn cached_candidates_recheck_context_wrapper_after_text_replacement() {
     let mut first = rule(
         PrivacyScope::EnvironmentText,
         "$",
         PrivacyAction::RegexReplace,
     );
-    first.pattern = Some("<environment_context>".into());
-    first.replacement = "<environment_context note=\"test\">".into();
+    first.steps[0].pattern = Some("<environment_context>".into());
+    first.steps[0].replacement = "<environment_context note=\"test\">".into();
     let mut last = rule(
         PrivacyScope::EnvironmentText,
         "$",
         PrivacyAction::RegexReplace,
     );
     last.id = "last".into();
-    last.pattern = Some("private".into());
-    last.replacement = "public".into();
+    last.steps[0].pattern = Some("private".into());
+    last.steps[0].replacement = "public".into();
     let output = preview(sample(
         vec![first, last],
         json!({"input":[{"role":"user","content":[

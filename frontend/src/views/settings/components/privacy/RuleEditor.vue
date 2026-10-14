@@ -1,32 +1,38 @@
 <script setup lang="ts">
-import type { PrivacyRule } from '@/api/modules/settings/privacy'
+import type { PrivacyRule, PrivacySample } from '@/api/modules/settings/privacy'
 import { ZButton, ZCheckbox, ZDialog, ZForm, ZFormItem, ZIconButton, ZInput, ZPopover, ZSelect, ZTextarea } from '@codex-proxy/ui'
-import { CircleHelp, Play } from '@lucide/vue'
+import { ArrowDown, ArrowUp, CircleHelp, Play, Plus, Trash2 } from '@lucide/vue'
 import { cloneDeep } from 'es-toolkit'
 import { computed, ref, shallowRef, useId, watch } from 'vue'
 import { usePrivacyPreview } from '../../composables/usePrivacyPreview'
-import { actions, fieldsByScope, makeSample, newRule, sampleText, scopes } from './presets'
+import { actions, exampleRequest, fieldsByScope, newRule, newStep, scopes } from './presets'
 
-const props = defineProps<{ rule: PrivacyRule | null, isNew: boolean, disabled: boolean }>()
+const props = defineProps<{ rule: PrivacyRule | null, maxSteps: number, isNew: boolean, disabled: boolean }>()
 const emit = defineEmits<{ apply: [rule: PrivacyRule] }>()
 const open = defineModel<boolean>({ required: true })
 const fieldPresetId = useId()
 const draft = ref<PrivacyRule>(newRule())
+const selectedIndex = shallowRef(0)
+const step = computed(() => draft.value.steps[selectedIndex.value]!)
+const stepOptions = computed(() => draft.value.steps.map((step, index) => ({ value: index, label: `${index + 1} · ${fieldsByScope[step.scope]?.find(field => field.value === step.selector)?.label || step.selector}` })))
 const sample = shallowRef('')
-const fixedValue = shallowRef('""')
+const fixedValues = ref<string[]>(['""'])
+const fixedValue = computed({ get: () => fixedValues.value[selectedIndex.value] ?? '""', set: (value: string) => {
+  fixedValues.value[selectedIndex.value] = value
+} })
 const localError = shallowRef('')
 const preview = usePrivacyPreview()
 const { loading, error, result } = preview
-const usesPattern = computed(() => ['regex_replace', 'rename_key'].includes(draft.value.action) || (draft.value.action === 'remove_field' && draft.value.pattern !== null))
-const pattern = computed({ get: () => draft.value.pattern ?? '', set: (value: string) => {
-  draft.value.pattern = value
+const usesPattern = computed(() => ['regex_replace', 'rename_key'].includes(step.value.action) || (step.value.action === 'remove_field' && step.value.pattern !== null))
+const pattern = computed({ get: () => step.value.pattern ?? '', set: (value: string) => {
+  step.value.pattern = value
 } })
-const conditional = computed({ get: () => draft.value.pattern !== null, set: (value: boolean) => {
-  draft.value.pattern = value ? '' : null
+const conditional = computed({ get: () => step.value.pattern !== null, set: (value: boolean) => {
+  step.value.pattern = value ? '' : null
 } })
-const fields = computed(() => fieldsByScope[draft.value.scope] ?? [])
-const fieldChoice = computed({ get: () => fields.value.some(field => field.value === draft.value.selector) ? draft.value.selector : '', set: (value: string) => {
-  draft.value.selector = value
+const fields = computed(() => fieldsByScope[step.value.scope] ?? [])
+const fieldChoice = computed({ get: () => fields.value.some(field => field.value === step.value.selector) ? step.value.selector : '', set: (value: string) => {
+  step.value.selector = value
 } })
 const selectorPlaceholder = computed(() => ({
   turn_metadata: '例如：$.workspaces.*.associated_remote_urls.*',
@@ -34,66 +40,86 @@ const selectorPlaceholder = computed(() => ({
   environment_text: '填写 $，匹配整段环境文本',
   request_body: '例如：$.metadata.workspace',
   request_header: '例如：x-client-name',
-})[draft.value.scope])
-const processed = computed(() => {
-  if (!result.value)
-    return ''
-  if (draft.value.scope === 'turn_metadata')
-    return JSON.stringify(JSON.parse(result.value.turnMetadata ?? '{}'), null, 2)
-  if (draft.value.scope === 'request_header')
-    return JSON.stringify(result.value.headers, null, 2)
-  return JSON.stringify(result.value.body, null, 2)
-})
+})[step.value.scope])
+const processed = computed(() => result.value ? JSON.stringify({ body: result.value.body, headers: result.value.headers, turnMetadata: result.value.turnMetadata }, null, 2) : '')
 const outcome = computed(() => result.value?.outcomes[0])
 
 watch(open, (value) => {
   preview.invalidate()
   localError.value = ''
   if (value) {
+    selectedIndex.value = 0
     draft.value = cloneDeep(props.rule ?? newRule())
-    fixedValue.value = JSON.stringify(draft.value.value)
-    sample.value = sampleText(draft.value.scope)
+    fixedValues.value = draft.value.steps.map(step => JSON.stringify(step.value))
+    sample.value = JSON.stringify(exampleRequest(), null, 2)
   }
   else {
     sample.value = ''
   }
 })
-watch(() => draft.value.scope, (scope) => {
-  sample.value = sampleText(scope)
-})
-watch(() => draft.value.action, (action) => {
+watch(() => step.value.action, (action) => {
   if (action === 'set_value')
-    draft.value.pattern = null
-  else if (action !== 'remove_field' && draft.value.pattern === null)
-    draft.value.pattern = ''
+    step.value.pattern = null
+  else if (action !== 'remove_field' && step.value.pattern === null)
+    step.value.pattern = ''
 })
-watch([draft, sample, fixedValue], () => {
+watch([draft, sample, fixedValues], () => {
   preview.invalidate()
   localError.value = ''
 }, { deep: true, flush: 'sync' })
 
+function addStep() {
+  if (draft.value.steps.length >= props.maxSteps)
+    return
+  draft.value.steps.push(newStep())
+  fixedValues.value.push('""')
+  selectedIndex.value = draft.value.steps.length - 1
+}
+function removeStep() {
+  if (draft.value.steps.length <= 1)
+    return
+  const index = selectedIndex.value
+  selectedIndex.value = Math.max(0, index - 1)
+  draft.value.steps.splice(index, 1)
+  fixedValues.value.splice(index, 1)
+}
+function moveStep(offset: number) {
+  const index = selectedIndex.value
+  const target = index + offset
+  if (!draft.value.steps[target])
+    return
+  const [moved] = draft.value.steps.splice(index, 1)
+  draft.value.steps.splice(target, 0, moved!)
+  const [fixed] = fixedValues.value.splice(index, 1)
+  fixedValues.value.splice(target, 0, fixed!)
+  selectedIndex.value = target
+}
 function preparedRule() {
   const rule = cloneDeep(draft.value)
-  if (!rule.name.trim() || !rule.selector.trim())
-    throw new Error('请填写规则名称和字段路径')
-  if (rule.action === 'set_value') {
-    try {
-      rule.value = JSON.parse(fixedValue.value)
+  if (!rule.name.trim())
+    throw new Error('请填写规则名称')
+  if (rule.steps.length > props.maxSteps)
+    throw new Error('所有规则合计最多 32 个处理步骤')
+  rule.steps.forEach((step, index) => {
+    if (!step.selector.trim())
+      throw new Error(`请填写步骤 ${index + 1} 的字段路径`)
+    if (step.action === 'set_value') {
+      try {
+        step.value = JSON.parse(fixedValues.value[index] ?? '""')
+      }
+      catch { throw new Error(`步骤 ${index + 1} 的固定值应为 JSON，例如 "别名"、false 或 123`) }
     }
-    catch { throw new Error('固定值应为 JSON，例如 "别名"、false 或 123') }
-  }
+  })
   return rule
 }
-
 async function test() {
   try {
     const rule = preparedRule()
-    const value = makeSample(rule.scope, sample.value, rule.selector)
+    const value: PrivacySample = JSON.parse(sample.value)
     await preview.run({ enabled: true, onError: 'skip_rule', rules: [{ ...rule, enabled: true }] }, value)
   }
   catch (cause) { localError.value = cause instanceof Error ? cause.message : '样本格式无效' }
 }
-
 async function apply() {
   if (props.disabled)
     return
@@ -110,19 +136,56 @@ async function apply() {
 </script>
 
 <template>
-  <ZDialog v-model="open" :title="isNew ? '添加规则' : '编辑规则'" width="42rem">
+  <ZDialog v-model="open" :title="isNew ? '添加规则' : '编辑规则'" width="48rem">
     <div class="grid gap-4">
       <ZForm class="sm:grid-cols-2">
         <ZFormItem class="sm:col-span-2" label="规则名称" required>
-          <ZInput v-model="draft.name" placeholder="例如：工作区仓库地址脱敏" aria-label="规则名称" maxlength="64" />
+          <ZInput v-model="draft.name" placeholder="例如：统一工作区信息" aria-label="规则名称" maxlength="64" />
+        </ZFormItem>
+        <ZFormItem class="sm:col-span-2" label="处理步骤">
+          <template #label-extra>
+            <ZPopover trigger="hover-click">
+              <template #reference="{ open: helpOpen }">
+                <ZIconButton size="small" aria-label="处理步骤说明" :title="undefined" class="-my-2 hover:bg-transparent! active:bg-transparent!" :aria-expanded="helpOpen">
+                  <CircleHelp class="size-3.5" />
+                </ZIconButton>
+              </template>
+              <div class="max-w-72 space-y-2 p-3 text-cp-sm text-cp-text-secondary">
+                <p class="m-0">
+                  处理步骤是一条规则内的具体操作，每一步可分别设置作用范围、字段和处理方式
+                </p>
+                <p class="m-0">
+                  步骤按编号依次执行，后一步基于前一步的结果处理，例如先统一用户名，再统一工作区路径
+                </p>
+                <p class="m-0">
+                  所有步骤共用规则开关，任一步骤失败会撤销本条规则的全部修改，再按失败策略跳过或阻止请求
+                </p>
+              </div>
+            </ZPopover>
+          </template>
+          <div class="flex items-center gap-2">
+            <ZSelect v-model="selectedIndex" class="min-w-0 flex-1" :options="stepOptions" aria-label="选择处理步骤" />
+            <ZIconButton :disabled="selectedIndex === 0" aria-label="上移步骤" @click="moveStep(-1)">
+              <ArrowUp class="size-4" />
+            </ZIconButton>
+            <ZIconButton :disabled="selectedIndex === draft.steps.length - 1" aria-label="下移步骤" @click="moveStep(1)">
+              <ArrowDown class="size-4" />
+            </ZIconButton>
+            <ZIconButton :disabled="draft.steps.length >= maxSteps" aria-label="添加步骤" @click="addStep">
+              <Plus class="size-4" />
+            </ZIconButton>
+            <ZIconButton :disabled="draft.steps.length === 1" aria-label="删除步骤" @click="removeStep">
+              <Trash2 class="size-4" />
+            </ZIconButton>
+          </div>
         </ZFormItem>
         <ZFormItem label="作用范围">
-          <ZSelect v-model="draft.scope" class="w-full" :options="scopes" aria-label="作用范围" />
+          <ZSelect v-model="step.scope" class="w-full" :options="scopes" aria-label="作用范围" />
         </ZFormItem>
         <ZFormItem label="处理方式">
-          <ZSelect v-model="draft.action" class="w-full" :options="actions" aria-label="处理方式" />
+          <ZSelect v-model="step.action" class="w-full" :options="actions" aria-label="处理方式" />
         </ZFormItem>
-        <ZFormItem class="sm:col-span-2" :label="draft.scope === 'request_header' ? '请求头名称' : '字段路径'" required>
+        <ZFormItem class="sm:col-span-2" :label="step.scope === 'request_header' ? '请求头名称' : '字段路径'" required>
           <template #label-extra>
             <ZPopover trigger="hover-click">
               <template #reference="{ open: helpOpen }">
@@ -136,15 +199,15 @@ async function apply() {
             </ZPopover>
           </template>
           <div class="flex flex-wrap items-center gap-2 sm:flex-nowrap">
-            <ZInput v-model="draft.selector" :placeholder="selectorPlaceholder" aria-label="字段路径" maxlength="1024" class="min-w-0 flex-1 font-mono" :class="fields.length ? 'basis-full sm:basis-auto' : undefined" spellcheck="false" />
+            <ZInput v-model="step.selector" :placeholder="selectorPlaceholder" aria-label="字段路径" maxlength="1024" class="min-w-0 flex-1 font-mono" :class="fields.length ? 'basis-full sm:basis-auto' : undefined" spellcheck="false" />
             <ZSelect v-if="fields.length" :id="fieldPresetId" v-model="fieldChoice" class="min-w-0 flex-1 sm:w-40 sm:flex-none" :options="fields" aria-label="常用字段" />
           </div>
         </ZFormItem>
-        <ZCheckbox v-if="draft.action === 'remove_field'" v-model="conditional" class="sm:col-span-2" label="仅删除值匹配正则的字段或数组项" />
-        <ZFormItem v-if="usesPattern" :class="draft.action === 'remove_field' ? 'sm:col-span-2' : undefined" label="匹配表达式">
-          <ZInput v-model="pattern" :placeholder="draft.action === 'rename_key' ? '例如：^/home/[^/]+/' : '例如：private-org'" aria-label="匹配表达式" maxlength="4096" spellcheck="false" class="font-mono" />
+        <ZCheckbox v-if="step.action === 'remove_field'" v-model="conditional" class="sm:col-span-2" label="仅删除值匹配正则的字段或数组项" />
+        <ZFormItem v-if="usesPattern" :class="step.action === 'remove_field' ? 'sm:col-span-2' : undefined" label="匹配表达式">
+          <ZInput v-model="pattern" :placeholder="step.action === 'rename_key' ? '例如：^/home/[^/]+/' : '例如：private-org'" aria-label="匹配表达式" maxlength="4096" spellcheck="false" class="font-mono" />
         </ZFormItem>
-        <ZFormItem v-if="draft.action === 'regex_replace' || draft.action === 'rename_key'" label="替换内容">
+        <ZFormItem v-if="step.action === 'regex_replace' || step.action === 'rename_key'" label="替换内容">
           <template #label-extra>
             <ZPopover trigger="hover-click">
               <template #reference="{ open: helpOpen }">
@@ -157,21 +220,21 @@ async function apply() {
               </div>
             </ZPopover>
           </template>
-          <ZInput v-model="draft.replacement" :placeholder="draft.action === 'rename_key' ? '例如：/home/user/' : '例如：team，留空则清除匹配内容'" aria-label="替换内容" maxlength="4096" spellcheck="false" class="font-mono" />
+          <ZInput v-model="step.replacement" :placeholder="step.action === 'rename_key' ? '例如：/home/user/' : '例如：team，留空则清除匹配内容'" aria-label="替换内容" maxlength="4096" spellcheck="false" class="font-mono" />
         </ZFormItem>
-        <ZFormItem v-if="draft.action === 'set_value'" class="sm:col-span-2" label="固定值（JSON）">
+        <ZFormItem v-if="step.action === 'set_value'" class="sm:col-span-2" label="固定值（JSON）">
           <ZTextarea v-model="fixedValue" placeholder="例如：&quot;匿名&quot;、null 或 {}" :rows="2" maxlength="4096" aria-label="固定值 JSON" class="font-mono" />
         </ZFormItem>
         <div v-if="usesPattern" class="flex flex-wrap gap-x-4 gap-y-2 sm:col-span-2">
-          <ZCheckbox v-if="draft.action !== 'remove_field'" v-model="draft.replaceAll" label="替换全部匹配" />
-          <ZCheckbox v-model="draft.caseInsensitive" label="忽略大小写" />
-          <ZCheckbox v-model="draft.multiLine" label="多行匹配" />
+          <ZCheckbox v-if="step.action !== 'remove_field'" v-model="step.replaceAll" label="替换全部匹配" />
+          <ZCheckbox v-model="step.caseInsensitive" label="忽略大小写" />
+          <ZCheckbox v-model="step.multiLine" label="多行匹配" />
         </div>
       </ZForm>
       <section class="grid gap-2.5" aria-label="测试预览">
         <div class="flex items-center justify-between gap-3">
           <h3 class="m-0 text-cp-sm font-emphasis">
-            替换预览
+            规则预览
           </h3>
           <div class="flex items-center gap-2">
             <span v-if="outcome" class="text-cp-xs text-cp-text-quaternary">{{ outcome.status === 'skipped' ? '规则已跳过' : `命中 ${outcome.matches} 处` }}</span>
@@ -184,7 +247,7 @@ async function apply() {
         </div>
         <div class="grid min-w-0 gap-3 sm:grid-cols-2">
           <ZFormItem label="测试样本">
-            <ZTextarea v-model="sample" size="small" resize="none" placeholder="粘贴对应作用范围的样本内容" maxlength="262144" aria-label="测试样本" class="font-mono [&_textarea]:block [&_textarea]:h-36" spellcheck="false" />
+            <ZTextarea v-model="sample" size="small" resize="none" placeholder="粘贴包含 body、headers、turnMetadata 的请求样本" maxlength="262144" aria-label="测试样本" class="font-mono [&_textarea]:block [&_textarea]:h-36" spellcheck="false" />
           </ZFormItem>
           <div class="grid min-w-0 content-start gap-2">
             <span class="flex min-h-4 items-center text-cp leading-none font-medium text-cp-text-secondary">处理后</span>

@@ -123,15 +123,17 @@ async fn privacy_policy_upgrade_defaults_off_and_round_trips_in_snapshot() {
             id: "remove-auth".into(),
             name: "配置者控制".into(),
             enabled: true,
-            scope: PrivacyScope::RequestHeader,
-            selector: "authorization".into(),
-            action: PrivacyAction::RemoveField,
-            pattern: None,
-            replacement: String::new(),
-            value: serde_json::Value::Null,
-            replace_all: true,
-            case_insensitive: false,
-            multi_line: false,
+            steps: vec![PrivacyStep {
+                scope: PrivacyScope::RequestHeader,
+                selector: "authorization".into(),
+                action: PrivacyAction::RemoveField,
+                pattern: None,
+                replacement: String::new(),
+                value: serde_json::Value::Null,
+                replace_all: true,
+                case_insensitive: false,
+                multi_line: false,
+            }],
         }],
     };
     let expected = update.values.codex_privacy_policy.clone();
@@ -150,6 +152,142 @@ async fn privacy_policy_upgrade_defaults_off_and_round_trips_in_snapshot() {
     assert_eq!(
         before.values.codex_privacy_policy,
         CodexPrivacyPolicy::default()
+    );
+    database.close().await;
+}
+
+#[tokio::test]
+async fn privacy_steps_migration_preserves_rules_and_other_settings() {
+    let Some(database) = TestDatabase::create_through("privacy_steps", 30).await else {
+        return;
+    };
+    let legacy = serde_json::json!({
+        "enabled":true, "onError":"skip_rule", "rules":[
+            {"id":"first","name":"旧规则一","enabled":true,"scope":"request_header","selector":"x-private",
+             "action":"remove_field","pattern":null,"replacement":"","value":null,
+             "replaceAll":true,"caseInsensitive":false,"multiLine":false},
+            {"id":"second","name":"旧规则二","enabled":false,"scope":"request_body","selector":"$.owner",
+             "action":"regex_replace","pattern":"alice","replacement":"user","value":null,
+             "replaceAll":false,"caseInsensitive":true,"multiLine":true}
+        ]
+    });
+    let mut expected = serde_json::json!({
+        "enabled":true, "onError":"skip_rule", "rules":[
+            {"id":"first","name":"旧规则一","enabled":true,"steps":[
+                {"scope":"request_header","selector":"x-private","action":"remove_field",
+                 "pattern":null,"replacement":"","value":null,
+                 "replaceAll":true,"caseInsensitive":false,"multiLine":false}]},
+            {"id":"second","name":"旧规则二","enabled":false,"steps":[
+                {"scope":"request_body","selector":"$.owner","action":"regex_replace",
+                 "pattern":"alice","replacement":"user","value":null,
+                 "replaceAll":false,"caseInsensitive":true,"multiLine":true}]}
+        ]
+    });
+    // 同时包含聚合规则，迁移不能嵌套包装或拆散现有步骤
+    let canonical = serde_json::json!({
+        "id":"aggregate","name":"通用聚合规则","enabled":true,"steps":[
+            {"scope":"request_body","selector":"$.metadata","action":"set_value",
+             "pattern":null,"replacement":"","value":{"owner":"user","items":[1,2]},
+             "replaceAll":true,"caseInsensitive":false,"multiLine":false},
+            {"scope":"request_header","selector":"x-private","action":"remove_field",
+             "pattern":null,"replacement":"","value":null,
+             "replaceAll":true,"caseInsensitive":false,"multiLine":false}
+        ]
+    });
+    let mut mixed = legacy;
+    mixed["rules"]
+        .as_array_mut()
+        .unwrap()
+        .insert(1, canonical.clone());
+    expected["rules"]
+        .as_array_mut()
+        .unwrap()
+        .insert(1, canonical);
+    sqlx::query("update runtime_settings set codex_privacy_policy_json = $1, config_revision = 70, refresh_margin_seconds = 1234 where id = 1")
+        .bind(&mixed).execute(&database.pool).await.unwrap();
+    let mut expected_row: serde_json::Value =
+        sqlx::query_scalar("select to_jsonb(runtime_settings) from runtime_settings where id = 1")
+            .fetch_one(&database.pool)
+            .await
+            .unwrap();
+    expected_row["codex_privacy_policy_json"] = expected.clone();
+
+    super::TEST_MIGRATOR.run(&database.pool).await.unwrap();
+    let stored: serde_json::Value =
+        sqlx::query_scalar("select to_jsonb(runtime_settings) from runtime_settings where id = 1")
+            .fetch_one(&database.pool)
+            .await
+            .unwrap();
+    assert_eq!(stored, expected_row);
+    let repository = PgRuntimeSettingsRepository::new(database.pool.clone());
+    let loaded = repository.load_runtime_settings().await.unwrap();
+    assert_eq!(
+        serde_json::to_value(&loaded.values.codex_privacy_policy).unwrap(),
+        expected
+    );
+    // 已迁移的规则再次执行转换也不产生写入或额外嵌套
+    sqlx::raw_sql(include_str!(
+        "../../../../migrations/0032_privacy_rule_steps.sql"
+    ))
+    .execute(&database.pool)
+    .await
+    .unwrap();
+    let stored: serde_json::Value =
+        sqlx::query_scalar("select to_jsonb(runtime_settings) from runtime_settings where id = 1")
+            .fetch_one(&database.pool)
+            .await
+            .unwrap();
+    assert_eq!(stored, expected_row);
+    let snapshot = gateway_store::postgres::RuntimeSnapshotRepository::load_runtime_snapshot(
+        &gateway_store::postgres::PgRuntimeSnapshotRepository::new(database.pool.clone()),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        serde_json::to_value(snapshot.settings).unwrap()["codex_privacy_policy"],
+        expected
+    );
+    database.close().await;
+}
+
+#[tokio::test]
+async fn privacy_steps_migration_rejects_non_object_without_losing_data() {
+    let Some(database) = TestDatabase::create_through("privacy_invalid", 30).await else {
+        return;
+    };
+    let invalid = serde_json::json!({
+        "enabled":false,"onError":"reject_request","rules":[{},42]
+    });
+    sqlx::query("update runtime_settings set codex_privacy_policy_json = $1 where id = 1")
+        .bind(&invalid)
+        .execute(&database.pool)
+        .await
+        .unwrap();
+    assert!(super::TEST_MIGRATOR.run(&database.pool).await.is_err());
+    let stored: serde_json::Value =
+        sqlx::query_scalar("select codex_privacy_policy_json from runtime_settings where id = 1")
+            .fetch_one(&database.pool)
+            .await
+            .unwrap();
+    assert_eq!(stored, invalid);
+    let applied: bool =
+        sqlx::query_scalar("select exists(select 1 from _sqlx_migrations where version = 32)")
+            .fetch_one(&database.pool)
+            .await
+            .unwrap();
+    assert!(!applied);
+    sqlx::query("update runtime_settings set codex_privacy_policy_json = jsonb_set(codex_privacy_policy_json, '{rules}', '[]') where id = 1")
+        .execute(&database.pool).await.unwrap();
+    super::TEST_MIGRATOR.run(&database.pool).await.unwrap();
+    let loaded = PgRuntimeSettingsRepository::new(database.pool.clone())
+        .load_runtime_settings()
+        .await
+        .unwrap();
+    assert!(!loaded.values.codex_privacy_policy.enabled);
+    assert!(loaded.values.codex_privacy_policy.rules.is_empty());
+    assert_eq!(
+        loaded.values.codex_privacy_policy.on_error,
+        gateway_core::settings::privacy::PrivacyFailureMode::RejectRequest
     );
     database.close().await;
 }

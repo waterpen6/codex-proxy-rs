@@ -4,12 +4,12 @@ use gateway_core::settings::privacy::PrivacyScope;
 use reqwest::header::{HeaderMap, HeaderValue};
 use serde_json::Value;
 
-use super::{Budget, changes::BodyChanges, rule::CompiledRule};
+use super::{Budget, changes::BodyChanges, rule::CompiledStep};
 
 const METADATA_KEYS: &[&str] = &["turnMetadata", "turn_metadata", "x-codex-turn-metadata"];
 
 pub(super) fn prepare(
-    rule: &CompiledRule,
+    rule: &CompiledStep,
     body: &Value,
     headers: &mut HeaderMap,
     turn_metadata: &mut Option<String>,
@@ -83,7 +83,7 @@ pub(super) fn prepare(
 }
 
 fn metadata_fields(
-    rule: &CompiledRule,
+    rule: &CompiledStep,
     body: &Value,
     changes: &mut BodyChanges,
     budget: &mut Budget<'_>,
@@ -106,7 +106,7 @@ fn metadata_fields(
 }
 
 fn metadata(
-    rule: &CompiledRule,
+    rule: &CompiledStep,
     raw: &mut String,
     budget: &mut Budget<'_>,
 ) -> Result<usize, &'static str> {
@@ -143,7 +143,7 @@ struct ContextTarget {
 impl ContextIndex {
     fn apply(
         &mut self,
-        rule: &CompiledRule,
+        rule: &CompiledStep,
         body: &Value,
         changes: &mut BodyChanges,
         budget: &mut Budget<'_>,
@@ -254,7 +254,7 @@ fn locate_contexts(
 }
 
 fn git(
-    rule: &CompiledRule,
+    rule: &CompiledStep,
     text: &mut String,
     budget: &mut Budget<'_>,
 ) -> Result<usize, &'static str> {
@@ -309,7 +309,7 @@ fn git(
 }
 
 fn environment(
-    rule: &CompiledRule,
+    rule: &CompiledStep,
     text: &mut String,
     budget: &mut Budget<'_>,
 ) -> Result<usize, &'static str> {

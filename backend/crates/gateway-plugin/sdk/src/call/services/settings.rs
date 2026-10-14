@@ -51,6 +51,11 @@ pub struct PrivacyRule {
     pub id: String,
     pub name: String,
     pub enabled: bool,
+    pub steps: Vec<PrivacyStep>,
+}
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PrivacyStep {
     pub scope: PrivacyScope,
     pub selector: String,
     pub action: PrivacyAction,
