@@ -50,9 +50,9 @@ async function test() {
       </p>
     </div>
     <template #footer>
-      <ZButton size="small" @click="open = false">
+      <ZButton @click="open = false">
         关闭
-      </ZButton><ZButton size="small" type="primary" :loading="loading" @click="test">
+      </ZButton><ZButton type="primary" :loading="loading" @click="test">
         测试规则
       </ZButton>
     </template>

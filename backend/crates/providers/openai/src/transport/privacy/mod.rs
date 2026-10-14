@@ -21,7 +21,13 @@ const MAX_PREVIEW_BYTES: usize = 256 * 1024;
 struct Policy {
     enabled: bool,
     failure: PrivacyFailureMode,
-    rules: Vec<rule::CompiledRule>,
+    rules: Vec<CompiledRule>,
+}
+
+struct CompiledRule {
+    id: String,
+    enabled: bool,
+    steps: Vec<rule::CompiledStep>,
 }
 
 impl std::fmt::Debug for Policy {
@@ -70,18 +76,46 @@ pub fn compile(
         });
     }
     let mut ids = BTreeSet::new();
+    let mut step_count = 0;
     let rules = policy
         .rules
         .iter()
         .enumerate()
         .map(|(rule_index, rule)| {
+            if rule.id.is_empty()
+                || rule.id.len() > 64
+                || rule.name.is_empty()
+                || rule.name.len() > 192
+            {
+                return Err(PrivacyError {
+                    rule_index,
+                    reason: "规则 ID 或名称长度不合法",
+                });
+            }
             if !ids.insert(&rule.id) {
                 return Err(PrivacyError {
                     rule_index,
                     reason: "规则 ID 重复",
                 });
             }
-            rule::CompiledRule::compile(rule).map_err(|reason| PrivacyError { rule_index, reason })
+            step_count += rule.steps.len();
+            if rule.steps.is_empty() || step_count > 32 {
+                return Err(PrivacyError {
+                    rule_index,
+                    reason: "每条规则至少一个处理步骤，所有规则合计最多 32 个步骤",
+                });
+            }
+            let steps = rule
+                .steps
+                .iter()
+                .map(rule::CompiledStep::compile)
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|reason| PrivacyError { rule_index, reason })?;
+            Ok(CompiledRule {
+                id: rule.id.clone(),
+                enabled: rule.enabled,
+                steps,
+            })
         })
         .collect::<Result<Vec<_>, _>>()?;
     Ok(Arc::new(Policy {
@@ -109,13 +143,13 @@ impl CompiledPrivacyPolicy for Policy {
         let mut contexts = carrier::ContextIndex::default();
         for (rule_index, rule) in self.rules.iter().enumerate() {
             let mut outcome = PrivacyRuleOutcome {
-                rule_id: rule.rule.id.clone(),
+                rule_id: rule.id.clone(),
                 matches: 0,
                 status: "disabled".to_owned(),
                 reason: None,
             };
-            if self.enabled && rule.rule.enabled {
-                // 一条规则的所有承载副本同成同败，失败不会留下部分改写
+            if self.enabled && rule.enabled {
+                // 一条规则的所有步骤与承载副本同成同败，失败不会留下部分改写
                 let result = (|| {
                     budget.step()?;
                     let original_size =
@@ -123,25 +157,34 @@ impl CompiledPrivacyPolicy for Policy {
                     let original_size = original_size?;
                     let mut next_headers = headers.clone();
                     let mut next_metadata = turn_metadata.clone();
-                    let mut changes = changes::BodyChanges::new(original_size);
-                    let count = carrier::prepare(
-                        rule,
-                        body,
-                        &mut next_headers,
-                        &mut next_metadata,
-                        &mut changes,
-                        &mut contexts,
-                        &mut budget,
-                    )?;
-                    let next_size = changes.size()?;
+                    let mut transaction = changes::BodyTransaction::new(body);
+                    let mut next_size = original_size;
+                    let mut count = 0;
+                    for step in &rule.steps {
+                        budget.step()?;
+                        let mut changes = changes::BodyChanges::new(next_size);
+                        let matches = carrier::prepare(
+                            step,
+                            transaction.body,
+                            &mut next_headers,
+                            &mut next_metadata,
+                            &mut changes,
+                            &mut contexts,
+                            &mut budget,
+                        )?;
+                        next_size = changes.size()?;
+                        budget.step()?;
+                        changes.commit(&mut transaction);
+                        count += matches;
+                        if matches > 0 && step.rule.scope == PrivacyScope::RequestBody {
+                            contexts = carrier::ContextIndex::default();
+                        }
+                    }
                     budget.step()?;
-                    changes.commit(body);
+                    transaction.finish();
                     *headers = next_headers;
                     *turn_metadata = next_metadata;
                     body_size = Some(Ok(next_size));
-                    if count > 0 && rule.rule.scope == PrivacyScope::RequestBody {
-                        contexts = carrier::ContextIndex::default();
-                    }
                     Ok(count)
                 })();
                 match result {
@@ -151,6 +194,8 @@ impl CompiledPrivacyPolicy for Policy {
                             if count == 0 { "unmatched" } else { "applied" }.to_owned();
                     }
                     Err(reason) => {
+                        // 索引可能来自已回滚的中间正文，不能复用到下一条规则
+                        contexts = carrier::ContextIndex::default();
                         if self.failure == PrivacyFailureMode::RejectRequest || cancelled() {
                             return Err(PrivacyError { rule_index, reason });
                         }
