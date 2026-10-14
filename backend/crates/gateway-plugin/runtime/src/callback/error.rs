@@ -4,7 +4,7 @@ use gateway_core::{
     engine::{EngineError, execution::gateway_error_from_engine, middleware::MiddlewareError},
     error::{
         ContinuationFailure, ContinuationRecoveryDisposition, GatewayError, GatewayErrorKind,
-        PreDeliveryRetry, ProviderError,
+        PreDeliveryRetry, ProviderError, TransientRetryPolicy,
     },
     upstream::UpstreamSendState,
 };
@@ -85,7 +85,15 @@ fn provider(error: &ProviderError) -> PluginFault {
                 gateway_core::engine::AttemptTransport::Fallback => json!({"kind":"fallback"}),
             }}),
             PreDeliveryRetry::SameAccountTransportRetry {retry_index,delay} => json!({"kind":"same_account_transport_retry","retry_index":retry_index.get(),"delay_ms":delay.as_millis()}),
-            PreDeliveryRetry::SameAccountTransientRetry {max_retries,initial_delay,max_delay} => json!({"kind":"same_account_transient_retry","max_retries":max_retries.get(),"initial_delay_ms":initial_delay.as_millis(),"max_delay_ms":max_delay.as_millis()}),
+            PreDeliveryRetry::SameAccountTransientRetry {max_retries,initial_delay,max_delay,jitter,policy} => json!({
+                "kind":"same_account_transient_retry","max_retries":max_retries.get(),
+                "initial_delay_ms":initial_delay.as_millis(),"max_delay_ms":max_delay.as_millis(),
+                "jitter_ms":jitter.as_millis(),
+                "policy": match policy {
+                    TransientRetryPolicy::RetryThenRotateAccount => "retry_then_rotate_account",
+                    TransientRetryPolicy::RetryThenReturnError => "retry_then_return_error",
+                },
+            }),
         }),
         "replay_safe": error.replay_is_safe(),
         "retry_same_account": error.retries_same_account(),

@@ -436,6 +436,35 @@ async fn resource_request(
 }
 
 #[tokio::test]
+async fn large_html_resource_should_remain_uncompressed() {
+    let fixture = published_fixture().await;
+    let path = format!("ui/{}.html", "a".repeat(2048));
+    let response = crate::openai::api_router_with_admin(fixture.services)
+        .oneshot(
+            Request::builder()
+                .uri(format!(
+                    "/api/admin/plugins/extensions/plugin-instance-diagnostic/{}/7/resources/{path}",
+                    "a".repeat(64)
+                ))
+                .header("cookie", "cpr_session=management-session")
+                .header("accept-encoding", "gzip")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()["content-type"], "text/html");
+    assert!(!response.headers().contains_key("content-encoding"));
+    assert_eq!(
+        axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap(),
+        path
+    );
+}
+
+#[tokio::test]
 async fn static_resources_revalidate_privately_after_authorization() {
     use axum::body::to_bytes;
     use gateway_admin::ports::plugins::PluginStore as _;

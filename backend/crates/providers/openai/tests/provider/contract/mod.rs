@@ -2,6 +2,7 @@
 
 mod account_isolation;
 mod capacity;
+mod cookies;
 mod error_details;
 mod image_account_eligibility;
 mod image_model_access;
@@ -8471,8 +8472,15 @@ async fn capacity_http_and_websocket_opening_rejections_use_bounded_business_ret
             assert_eq!(error.retry_after(), Some(Duration::from_secs(129600)));
             assert!(
                 matches!(error.pre_delivery_retry(), Some(PreDeliveryRetry::SameAccountTransientRetry {
-                max_retries, initial_delay, max_delay,
-            }) if max_retries.get() == 3 && initial_delay == Duration::from_millis(500) && max_delay == Duration::from_secs(8))
+                    max_retries,
+                    initial_delay,
+                    max_delay,
+                    jitter,
+                    policy: gateway_core::error::TransientRetryPolicy::RetryThenRotateAccount,
+                }) if max_retries.get() == 3
+                    && initial_delay == Duration::from_millis(500)
+                    && max_delay == Duration::from_secs(8)
+                    && jitter.is_zero())
             );
             assert!(provider_openai::openai_failure_affects_account_score(
                 &error
@@ -8497,15 +8505,27 @@ async fn capacity_http_and_websocket_opening_rejections_use_bounded_business_ret
 }
 
 #[tokio::test]
-async fn flex_http_and_websocket_opening_rejections_should_not_retry_or_cool_down_accounts() {
+async fn request_rejections_should_not_retry_or_cool_down_accounts() {
     use gateway_core::provider_ports::ProviderCooldownPort as _;
-    for use_websocket in [false, true] {
+    for (use_websocket, (code, expected_kind)) in [false, true].into_iter().flat_map(|websocket| {
+        [
+            ("flex_unavailable", ProviderErrorKind::Unavailable),
+            ("turn_rate_limit_exceeded", ProviderErrorKind::RateLimited),
+        ]
+        .map(|case| (websocket, case))
+    }) {
         let store = Arc::new(MemoryAccountStore::default());
         let account_id = "acct_provider_contract";
         create_account(&store, account_id).await;
         let cooldowns = Arc::new(MemoryCooldownPort::new());
         let server = MockServer::start().await;
-        let body = json!({"error":{"type":"resource_unavailable","code":"flex_unavailable","message":"Flex capacity unavailable."}});
+        let error_type = if code == "turn_rate_limit_exceeded" {
+            "rate_limit_error"
+        } else {
+            "resource_unavailable"
+        };
+        let body =
+            json!({"error":{"type":error_type,"code":code,"message":"Retry this request later."}});
         Mock::given(method(if use_websocket { "GET" } else { "POST" }))
             .and(path("/codex/responses"))
             .respond_with(
@@ -8526,7 +8546,7 @@ async fn flex_http_and_websocket_opening_rejections_should_not_retry_or_cool_dow
         let mut stream = provider
             .execute(
                 planned_request("openai", operation),
-                context("req_flex", CancellationToken::new()),
+                context("req_terminal_rejection", CancellationToken::new()),
             )
             .await
             .unwrap();
@@ -8534,14 +8554,12 @@ async fn flex_http_and_websocket_opening_rejections_should_not_retry_or_cool_dow
             match stream.next().await {
                 Some(Ok(_)) => {}
                 Some(Err(error)) => break error,
-                None => panic!("expected Flex failure"),
+                None => panic!("expected request rejection"),
             }
         };
-        assert_eq!(error.kind(), ProviderErrorKind::Unavailable);
-        assert_eq!(
-            error.upstream_code().map(|code| code.as_str()),
-            Some("flex_unavailable")
-        );
+        assert_eq!(error.kind(), expected_kind);
+        assert_eq!(error.upstream_code().map(|code| code.as_str()), Some(code));
+        assert_eq!(error.retry_after(), Some(Duration::from_secs(300)));
         assert!(!error.replay_is_safe());
         assert!(error.pre_delivery_retry().is_none());
         assert!(error.retry_is_prohibited());
@@ -8551,6 +8569,11 @@ async fn flex_http_and_websocket_opening_rejections_should_not_retry_or_cool_dow
         let response = error.client_visible_upstream_response().unwrap();
         assert_eq!(response.status(), 429);
         assert_eq!(response.body().as_ref(), body.to_string().as_bytes());
+        assert!(
+            response.headers().iter().any(|header| {
+                header.name() == "retry-after" && header.value().as_ref() == b"300"
+            })
+        );
         let account = store.account(account_id).unwrap();
         assert_eq!(account.credential_state(), CredentialState::Ready);
         assert_eq!(account.quota().access(), QuotaAccessState::Unknown);
@@ -8815,6 +8838,12 @@ async fn capacity_feedback_in_stream_only_counts_explicit_overload() {
                     false,
                 ),
                 (
+                    "turn_rate_limit_exceeded",
+                    "Retry this turn later.",
+                    ProviderErrorKind::RateLimited,
+                    false,
+                ),
+                (
                     "invalid_prompt",
                     "Invalid prompt: we've limited access to this content for safety reasons.",
                     ProviderErrorKind::InvalidRequest,
@@ -8855,7 +8884,10 @@ async fn capacity_feedback_in_stream_only_counts_explicit_overload() {
             if semantic_output {
                 events.push(json!({"type": "response.output_text.delta", "output_index": 0, "content_index": 0, "delta": "hello"}));
             }
-            let original = json!({"type": "response.failed", "response": {"id": "resp_capacity", "error": {"code": code, "message": message}}});
+            let mut original = json!({"type": "response.failed", "response": {"id": "resp_capacity", "error": {"code": code, "message": message}}});
+            if code == "turn_rate_limit_exceeded" {
+                original["response"]["error"]["headers"] = json!({"retry-after": "7"});
+            }
             events.push(original.clone());
             let (base_url, _http_server, websocket_server) = if use_websocket {
                 let listener = TcpListener::bind("127.0.0.1:0").await.expect("listener");
@@ -8927,6 +8959,10 @@ async fn capacity_feedback_in_stream_only_counts_explicit_overload() {
             );
             assert_eq!(error.replay_is_safe(), capacity && !semantic_output);
             assert_eq!(error.upstream_status(), None);
+            if code == "turn_rate_limit_exceeded" {
+                assert!(error.retry_is_prohibited());
+                assert_eq!(error.retry_after(), Some(Duration::from_secs(7)));
+            }
             assert_eq!(
                 error.pre_delivery_retry().is_some(),
                 capacity && !semantic_output

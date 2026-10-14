@@ -1587,6 +1587,8 @@ where
                 max_retries,
                 initial_delay,
                 max_delay,
+                jitter,
+                ..
             }) if ordinary_retry => {
                 let retries = self
                     .transient_retry_counts
@@ -1594,10 +1596,13 @@ where
                     .or_default();
                 if *retries < max_retries.get() {
                     let multiplier = 1_u32.checked_shl(*retries).unwrap_or(u32::MAX);
-                    // 服务器建议优先于本地退避，不能被本地上限缩短或再次指数放大
-                    let delay = error
-                        .retry_after()
-                        .unwrap_or_else(|| initial_delay.saturating_mul(multiplier).min(max_delay));
+                    // 服务器建议优先于本地退避，不截断、不放大，也不叠加随机等待
+                    let delay = error.retry_after().unwrap_or_else(|| {
+                        initial_delay
+                            .saturating_mul(multiplier)
+                            .min(max_delay)
+                            .saturating_add(jitter)
+                    });
                     *retries = retries.saturating_add(1);
                     Some(delay)
                 } else {
@@ -1620,9 +1625,17 @@ where
         // 同一排除分支。换号预算只在这里消耗；同账号分支（瞬态退避、传输恢复、
         // 凭据恢复重放、continuation 精确重连）不消耗。不能直接把预算门写进
         // ordinary_retry：它是同账号瞬态退避的前置条件，会被连带误伤
+        // RetryThenReturnError 耗尽后直接交付错误，不能落入 ordinary_retry 的换号兜底
         let rotation_retry = !continuation_retry
             && !same_account_retry
             && transient_retry.is_none()
+            && !matches!(
+                error.pre_delivery_retry(),
+                Some(crate::error::PreDeliveryRetry::SameAccountTransientRetry {
+                    policy: crate::error::TransientRetryPolicy::RetryThenReturnError,
+                    ..
+                })
+            )
             && transport_recovery.is_none()
             && (ordinary_retry || account_rotation_retry)
             && self.account_rotations

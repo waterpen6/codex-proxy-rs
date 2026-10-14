@@ -919,18 +919,33 @@ pub(super) fn cold_response_stream(response: ColdResponse) -> EventStream {
         }
         if allows_account_state_mutation
             && !response.set_cookie_headers.is_empty()
-            && let Ok(outcome) = selector
+        {
+            match selector
                 .capture_response_cookies(
                     &active_account,
                     &response_origin,
                     &response.set_cookie_headers,
                 )
                 .await
-                && let Some(revision) = outcome.credential_revision
-                && let Ok(current) = selector.current_account(active_account.id()).await
-                && current.revision().get() == revision
-        {
-            active_account = current;
+            {
+                Ok(outcome) => {
+                    if let Some(revision) = outcome.credential_revision
+                        && let Ok(current) = selector.current_account(active_account.id()).await
+                        && current.revision().get() == revision
+                    {
+                        active_account = current;
+                    }
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        request_id = %request_id,
+                        account_id = %active_account.id(),
+                        credential_revision = active_account.revision().get(),
+                        error = %error,
+                        "Failed to persist OpenAI response cookies"
+                    );
+                }
+            }
         }
         let response_transport = response.transport;
         let websocket_connection_id = response.websocket_connection_id;
@@ -940,7 +955,6 @@ pub(super) fn cold_response_stream(response: ColdResponse) -> EventStream {
             // opening ID 标识连接，不可作为缺失请求级错误头时的当前请求 ID
             failure_diagnostics.request_id = None;
         }
-        let failure_set_cookie_headers = response.set_cookie_headers.clone();
         let failure_rate_limit_headers = response.rate_limit_headers.clone();
         let mut passive_quota_observation =
             OpenAiPassiveQuotaObservation::new(response.rate_limit_headers);
@@ -1110,7 +1124,6 @@ pub(super) fn cold_response_stream(response: ColdResponse) -> EventStream {
                     map_canonical_error(
                         error,
                         &failure_diagnostics,
-                        &failure_set_cookie_headers,
                         &failure_rate_limit_headers,
                         ReplayBoundary::from_semantic_output(
                             semantic_output_seen || client_events.replay_closed(),
@@ -1226,7 +1239,6 @@ pub(super) fn cold_response_stream(response: ColdResponse) -> EventStream {
                 map_canonical_error(
                     error,
                     &failure_diagnostics,
-                    &failure_set_cookie_headers,
                     &failure_rate_limit_headers,
                     ReplayBoundary::from_semantic_output(
                         semantic_output_seen || client_events.replay_closed(),

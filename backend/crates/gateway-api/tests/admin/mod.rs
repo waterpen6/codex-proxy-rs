@@ -88,6 +88,7 @@ mod account_groups;
 mod accounts;
 mod auth;
 mod client_keys;
+mod compression;
 mod error_diagnostics;
 mod errors;
 mod observability;

@@ -86,6 +86,10 @@ HTTPS 来源以及缺失、`null` 或非法来源保留 `Secure`。`HttpOnly`、
 `api.request_id_header` 可改变注入与回传的 header 名，管理端鉴权不依赖该名字。
 管理端 JSON 与动态响应统一带 `Cache-Control: no-store`；插件静态资源按下述资源接口的私有缓存策略返回
 
+管理端长度已知且至少 1 KiB 的 `application/json` 响应按 `Accept-Encoding` 协商 gzip，
+压缩时返回 `Content-Encoding: gzip`，可协商的响应带 `Vary: accept-encoding`。
+小响应、SSE、其他流式正文及已有内容编码的响应不再压缩；模型执行接口不经过管理端压缩层
+
 配置了 CORS 白名单 origin 时，跨域请求以凭据模式放行，仅允许 `GET`/`POST` 方法和
 `authorization`、`content-type`、`x-api-key` 与 request ID 四个请求头，不使用通配符
 
@@ -442,6 +446,9 @@ xAI 的 `reasoning.effort` 接受 `none / minimal / low / medium / high / xhigh 
 同名时使用内部别名，并在返回工具调用时还原客户端名称。搜索工具顶层的 `allowed_domains` 不受支持，返回请求错误
 
 #### 容量拒绝与重试
+
+`turn_rate_limit_exceeded` 保留原始错误和 `Retry-After`，由客户端按自身重试预算等待。
+代理不因此写入账号冷却、换号或透明重试，其他会话仍可使用该账号
 
 Responses 的 HTTP/SSE 与 WebSocket 按顺序即时交付正常事件，不暂存前导等待后续输出。
 未启用中间件链时，无输出的 `response.created`、`response.in_progress`
@@ -1700,7 +1707,8 @@ Windows 离线包接口固定解析 Microsoft Store Product ID `9PLM9XGG6VKS` �
 产品 ID、上游地址、ring 或文件名。后端只返回通过包名、架构、Microsoft CDN host/path、scheme 和失效
 时间校验的 `x64` / `arm64` MSIX 直链，不代理安装包字节。Store 内容通道返回 HTTP/80 临时地址时保留
 原始 scheme，不强制改写为该 host 不保证支持的 HTTPS。动态链接不足 10 分钟即失效时不会下发；某个架构
-解析失败时只将该架构降级到 OpenAI 官方 HTTPS 稳定 MSIX，并通过 `warning` 说明。响应形状为：
+解析失败时只将该架构降级到 OpenAI 官方 HTTPS 稳定 MSIX，并通过 `warning` 说明。Store 解析最多等待
+30 秒，官方回退包通过最多 3 秒的 HEAD 请求补充大小，大小查询失败不影响下载地址。响应形状为：
 
 ```json
 {
@@ -1713,7 +1721,7 @@ Windows 离线包接口固定解析 Microsoft Store Product ID `9PLM9XGG6VKS` �
       "source": "microsoft_store",
       "version": "26.825.6671.0",
       "fileName": "OpenAI.Codex_26.825.6671.0_x64__2p2nqsd0c76g0.msix",
-      "sizeBytes": 744250000,
+      "sizeBytes": 780402688,
       "downloadUrl": "http://dl.delivery.mp.microsoft.com/filestreamingservice/files/...",
       "expiresAt": "2026-09-01T07:30:00Z"
     }

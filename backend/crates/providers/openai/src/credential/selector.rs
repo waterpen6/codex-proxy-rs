@@ -1758,6 +1758,8 @@ pub enum CredentialSelectionError {
     InvalidCredential(#[source] Option<ErrorSource>),
     #[error("Codex account changed repeatedly during selection")]
     AccountSnapshotChanged,
+    #[error("Codex credential revision conflict")]
+    RevisionConflict(#[source] ErrorSource),
     #[error("Codex account store is unavailable")]
     Store(#[source] ErrorSource),
     #[error("Codex account lease runtime is unavailable")]
@@ -1776,8 +1778,10 @@ impl From<CredentialRepositoryError> for CredentialSelectionError {
             CredentialRepositoryError::InvalidCredentialData(_) => {
                 Self::InvalidCredential(Some(ErrorSource::new(error)))
             }
-            CredentialRepositoryError::RevisionConflict(_)
-            | CredentialRepositoryError::Store(_) => Self::Store(ErrorSource::new(error)),
+            CredentialRepositoryError::RevisionConflict(_) => {
+                Self::RevisionConflict(ErrorSource::new(error))
+            }
+            CredentialRepositoryError::Store(_) => Self::Store(ErrorSource::new(error)),
         }
     }
 }

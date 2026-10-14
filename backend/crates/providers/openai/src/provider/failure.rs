@@ -2,6 +2,7 @@
 
 use super::*;
 use crate::transport::protocol::responses::is_replaceable_response_prelude;
+use gateway_core::error::TransientRetryPolicy;
 
 /// OpenAI 失败对 Smart 账号分数的结构化 reason 闭集
 ///
@@ -351,6 +352,7 @@ pub(super) async fn apply_failure(
     {
         tracing::warn!(
             account_id = %account.id(),
+            credential_revision = account.revision().get(),
             error = %error,
             "Failed to persist OpenAI response cookies"
         );
@@ -462,7 +464,7 @@ pub(super) fn apply_websocket_recovery_policy(
     if failure.error.retry_is_prohibited() {
         return;
     }
-    // 明确账号拒绝走已有换号路径，容量拒绝走请求内退避；两者都不消耗 WS 传输预算
+    // 明确账号拒绝走已有换号路径，业务瞬态失败走请求内退避，不消耗 WS 传输预算
     if failure.error.replay_is_safe()
         && (failure.account_failure.is_some()
             || matches!(
@@ -711,7 +713,6 @@ pub(super) fn stream_transport_allows_pre_delivery_retry(error: &CodexClientErro
 pub(super) fn map_canonical_error(
     error: CodexCanonicalError,
     diagnostics: &CodexUpstreamDiagnostics,
-    set_cookie_headers: &[String],
     rate_limit_headers: &[(String, String)],
     replay_boundary: ReplayBoundary,
 ) -> MappedProviderFailure {
@@ -721,7 +722,8 @@ pub(super) fn map_canonical_error(
             CodexUpstreamFailure::from_sse_failure(
                 &failure,
                 diagnostics,
-                set_cookie_headers,
+                // 响应头在开始消费流时已写回，流内失败不重放同一批 Cookie
+                &[],
                 rate_limit_headers,
                 CodexUpstreamSendPhase::AfterPayload,
             ),
@@ -1319,6 +1321,27 @@ pub(super) fn websocket_client_visible_error(
     ))
 }
 
+/// OpenAI 瞬态重试场景的策略归类入口
+///
+/// 新增场景在此选择重试后换号或返回错误，不在 Core 重新识别上游错误码
+/// 此处只选择策略，重放资格、次数与等待仍由现有 Provider 证明和 Core 门禁约束
+fn transient_retry_policy(
+    category: CodexFailureCategory,
+    failure: &CodexUpstreamFailure,
+) -> Option<TransientRetryPolicy> {
+    match category {
+        // 明确容量拒绝沿用既有恢复范围，同账号重试耗尽后仍可尝试其他账号
+        CodexFailureCategory::CapacityUnavailable => {
+            Some(TransientRetryPolicy::RetryThenRotateAccount)
+        }
+        // 通用服务故障不足以证明账号异常，503/server_error 仅在原账号内恢复
+        _ if failure.is_retryable_server_error() => {
+            Some(TransientRetryPolicy::RetryThenReturnError)
+        }
+        _ => None,
+    }
+}
+
 pub(super) fn map_upstream_failure(
     mut failure: CodexUpstreamFailure,
     observation: Option<ProviderResponseObservation>,
@@ -1326,6 +1349,7 @@ pub(super) fn map_upstream_failure(
 ) -> MappedProviderFailure {
     let category = failure.category();
     let capacity_unavailable = category == CodexFailureCategory::CapacityUnavailable;
+    let retry_policy = transient_retry_policy(category, &failure);
     let cyber_policy_failure = failure
         .status
         .is_some_and(|status| status.is_client_error())
@@ -1392,12 +1416,26 @@ pub(super) fn map_upstream_failure(
     if let Some(retry_after) = failure.retry_after_seconds.map(Duration::from_secs) {
         error = error.with_retry_after(retry_after);
     }
-    if capacity_unavailable && error.replay_is_safe() {
-        let max_delay = Duration::from_secs(8);
+    if let Some(policy) = retry_policy
+        && error.replay_is_safe()
+    {
+        let (max_retries, max_delay, jitter) = match policy {
+            TransientRetryPolicy::RetryThenRotateAccount => {
+                (3, Duration::from_secs(8), Duration::ZERO)
+            }
+            // 服务故障只在原账号恢复，以较短的等待上限控制总延迟，并逐次采样分散重试
+            TransientRetryPolicy::RetryThenReturnError => (
+                5,
+                Duration::from_secs(2),
+                crate::jitter::server_error_retry_jitter(crate::jitter::random_u64()),
+            ),
+        };
         error = error.with_transient_retry(
-            NonZeroU32::new(3).unwrap_or(NonZeroU32::MIN),
+            NonZeroU32::new(max_retries).unwrap_or(NonZeroU32::MIN),
             Duration::from_millis(500),
             max_delay,
+            jitter,
+            policy,
         );
     }
     if let Some(code) = failure.upstream_code() {
@@ -1462,7 +1500,9 @@ pub(super) const fn provider_error_kind(category: CodexFailureCategory) -> Provi
             ProviderErrorKind::PermissionDenied
         }
         CodexFailureCategory::UsageLimitExhausted => ProviderErrorKind::QuotaExhausted,
-        CodexFailureCategory::RateLimited => ProviderErrorKind::RateLimited,
+        CodexFailureCategory::RateLimited | CodexFailureCategory::TurnRateLimited => {
+            ProviderErrorKind::RateLimited
+        }
         CodexFailureCategory::QuotaExhausted => ProviderErrorKind::QuotaExhausted,
         CodexFailureCategory::CloudflareChallenge
         | CodexFailureCategory::CloudflarePathBlocked
@@ -1517,6 +1557,7 @@ pub(super) fn account_failure(
             Some(CodexAccountFailure::CloudflarePathBlocked)
         }
         CodexFailureCategory::ModelUnsupported
+        | CodexFailureCategory::TurnRateLimited
         | CodexFailureCategory::InvalidRequest
         | CodexFailureCategory::PermissionDenied
         | CodexFailureCategory::Timeout

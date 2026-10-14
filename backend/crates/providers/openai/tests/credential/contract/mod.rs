@@ -1841,6 +1841,41 @@ fn cloudflare_path_block_deletes_provider_owned_cookies() {
 }
 
 #[test]
+fn stale_response_cookie_capture_reports_revision_conflict_and_preserves_newer_cookie() {
+    let store = Arc::new(MemoryAccountStore::default());
+    create_account(&store, "acct_primary", "at-primary");
+    let selector = selector(&store, Arc::new(TestLeaseCoordinator::default()));
+    let origin = Url::parse("https://chatgpt.com/backend-api/codex/responses").unwrap();
+    let stale = store.account("acct_primary").unwrap();
+    block_on(selector.capture_response_cookies(
+        &stale,
+        &origin,
+        &["cf_clearance=newer; Path=/; Secure; Max-Age=3600".to_owned()],
+    ))
+    .unwrap();
+    let current = store.account("acct_primary").unwrap();
+
+    let error = block_on(selector.capture_response_cookies(
+        &stale,
+        &origin,
+        &["cf_clearance=older; Path=/; Secure; Max-Age=3600".to_owned()],
+    ))
+    .unwrap_err();
+
+    assert!(matches!(
+        error,
+        CredentialSelectionError::RevisionConflict(_)
+    ));
+    assert_eq!(error.to_string(), "Codex credential revision conflict");
+    assert_eq!(
+        store.account("acct_primary").unwrap().revision(),
+        current.revision()
+    );
+    let data = block_on(store.repository().load_complete_data(&current)).unwrap();
+    assert_eq!(data.cookies()[0].value, "newer");
+}
+
+#[test]
 fn response_cookie_rotation_returns_a_current_account_for_later_fenced_writes() {
     let store = Arc::new(MemoryAccountStore::default());
     create_account(&store, "acct_primary", "at-primary");
